@@ -2,6 +2,7 @@
 API Flask StickerStreet - Backend partagé entre la webapp et le bot Telegram
 """
 import hashlib
+import hmac
 import json
 import os
 import re
@@ -14,8 +15,53 @@ from datetime import datetime
 from flask import Flask, jsonify, request
 from flask_cors import CORS
 
+try:
+    from flask_limiter import Limiter
+    from flask_limiter.util import get_remote_address
+    _HAS_LIMITER = True
+except ImportError:
+    _HAS_LIMITER = False
+
 app = Flask(__name__)
-CORS(app, resources={r"/api/*": {"origins": "*", "methods": ["GET", "POST", "PATCH", "DELETE", "OPTIONS"], "allow_headers": ["Content-Type", "X-Admin-Key", "Authorization"]}})
+
+_raw_origins = (os.environ.get("ALLOWED_ORIGINS", "") or "").strip()
+_cors_origins = [o.strip() for o in _raw_origins.split(",") if o.strip()] if _raw_origins else ["*"]
+CORS(app, resources={r"/api/*": {
+    "origins": _cors_origins,
+    "methods": ["GET", "POST", "PATCH", "DELETE", "OPTIONS"],
+    "allow_headers": ["Content-Type", "X-Admin-Key", "Authorization"],
+}})
+
+if _HAS_LIMITER:
+    limiter = Limiter(
+        get_remote_address, app=app,
+        default_limits=["120 per minute"],
+        storage_uri="memory://",
+    )
+else:
+    class _FakeLimiter:
+        def limit(self, *a, **kw):
+            def decorator(f): return f
+            return decorator
+        def exempt(self, f): return f
+    limiter = _FakeLimiter()
+    app.logger.warning("flask-limiter non installé — rate limiting désactivé")
+
+@app.before_request
+def _csrf_origin_check():
+    """Bloque les requêtes mutantes dont l'Origin ne fait pas partie des domaines autorisés."""
+    if request.method in ("GET", "HEAD", "OPTIONS"):
+        return None
+    if _cors_origins == ["*"]:
+        return None
+    origin = (request.headers.get("Origin") or "").strip().rstrip("/")
+    if not origin:
+        return None
+    allowed = [o.rstrip("/") for o in _cors_origins]
+    if origin in allowed:
+        return None
+    return jsonify({"error": "Origin non autorisée"}), 403
+
 
 TELEGRAM_BOT_TOKEN = os.environ.get("TELEGRAM_BOT_TOKEN", "")
 # Admins : un seul ID ou plusieurs séparés par des virgules (ex: 123,456,789)
@@ -113,10 +159,13 @@ def _require_admin_api_key():
     if not ADMIN_API_KEY:
         return None
     raw_auth = (request.headers.get("Authorization") or "").strip()
-    bearer = raw_auth.split(" ", 1)[1].strip() if raw_auth.lower().startswith("bearer ") else ""
+    bearer = ""
+    if raw_auth.lower().startswith("bearer "):
+        parts = raw_auth.split(" ", 1)
+        bearer = parts[1].strip() if len(parts) > 1 else ""
     header_key = (request.headers.get("X-Admin-Key") or "").strip()
     incoming = header_key or bearer
-    if incoming != ADMIN_API_KEY:
+    if not incoming or not hmac.compare_digest(incoming, ADMIN_API_KEY):
         return jsonify({"error": "Accès admin refusé"}), 401
     return None
 
@@ -207,6 +256,7 @@ def _upload_bytes_to_blob(blob, folder, original_name, content_type):
     return {"url": url, "pathname": pathname}
 
 
+@limiter.limit("15 per minute")
 @app.route("/api/upload/blob", methods=["POST"])
 def upload_blob_file():
     """Upload un fichier image vers Vercel Blob et retourne l'URL publique."""
@@ -540,6 +590,7 @@ def get_orders():
     return jsonify(orders)
 
 
+@limiter.limit("20 per minute")
 @app.route("/api/orders", methods=["POST"])
 def create_order():
     """Créer une commande (depuis webapp ou bot)"""
@@ -832,6 +883,7 @@ def get_ton_rate():
     })
 
 
+@limiter.limit("10 per minute")
 @app.route("/api/invoice/stars", methods=["POST"])
 def create_invoice_stars():
     """Crée un lien de facture Telegram Stars. Conversion XOF → Stars alignée Fragment (via cours TON)."""
@@ -898,6 +950,7 @@ def create_invoice_stars():
         return jsonify({"error": str(e) or "Impossible de créer la facture"}), 500
 
 
+@limiter.limit("20 per minute")
 @app.route("/api/orders/from-invoice", methods=["POST"])
 def create_order_from_invoice():
     """Crée une commande à partir d'un invoice_id (appelé par le bot après paiement Stars)."""
@@ -945,6 +998,7 @@ def get_momo():
     return jsonify(data["momo"])
 
 
+@limiter.limit("10 per minute")
 @app.route("/api/auth/telegram", methods=["POST"])
 def auth_telegram():
     """Valide les données du Telegram Login Widget et enregistre/met à jour le client."""
@@ -960,8 +1014,6 @@ def auth_telegram():
     if not user_id or not hash_val or not auth_date:
         return jsonify({"error": "Données incomplètes"}), 400
 
-    # Vérification du hash (HMAC-SHA256)
-    import hmac
     data_check = "\n".join(f"{k}={v}" for k, v in sorted(body.items()) if k != "hash")
     secret = hashlib.sha256(TELEGRAM_BOT_TOKEN.encode()).digest()
     computed = hmac.new(secret, data_check.encode(), hashlib.sha256).hexdigest()
@@ -998,7 +1050,6 @@ def auth_telegram():
 
 def _validate_init_data(init_data):
     """Valide initData des Mini Apps Telegram et retourne le user (dict) ou None."""
-    import hmac
     if not TELEGRAM_BOT_TOKEN or not init_data or not init_data.strip():
         return None
     try:
@@ -1024,6 +1075,7 @@ def _validate_init_data(init_data):
         return None
 
 
+@limiter.limit("10 per minute")
 @app.route("/api/auth/telegram-miniapp", methods=["POST"])
 def auth_telegram_miniapp():
     """Connexion automatique (Mini App). Valide init_data ; si vide, accepte init_data_unsafe_user en secours."""
@@ -1143,7 +1195,18 @@ def update_profile():
 
 @app.route("/api/health", methods=["GET"])
 def health():
-    return jsonify({"status": "ok", "service": "stickerstreet-api"})
+    warnings = []
+    if not ADMIN_API_KEY:
+        warnings.append("ADMIN_API_KEY non configuré — endpoints admin non protégés")
+    if not BLOB_READ_WRITE_TOKEN:
+        warnings.append("BLOB_READ_WRITE_TOKEN manquant — upload images désactivé")
+    if not TELEGRAM_BOT_TOKEN:
+        warnings.append("TELEGRAM_BOT_TOKEN manquant — notifications désactivées")
+    if not _HAS_LIMITER:
+        warnings.append("flask-limiter non installé — rate limiting désactivé")
+    if _cors_origins == ["*"]:
+        warnings.append("ALLOWED_ORIGINS non défini — CORS ouvert à tous les domaines")
+    return jsonify({"status": "ok", "service": "stickerstreet-api", "warnings": warnings})
 
 
 def _send_telegram(text):
@@ -1170,6 +1233,7 @@ def get_chat():
     return jsonify(messages)
 
 
+@limiter.limit("30 per minute")
 @app.route("/api/chat", methods=["POST"])
 def post_chat():
     """Le client envoie un message → stockage + notification admin Telegram."""

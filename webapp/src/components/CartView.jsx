@@ -104,6 +104,12 @@ export default function CartView({ cart, totalXof, pay, setPay, rm, updQty, chec
                 <div style={{ fontFamily: "'Inter',sans-serif", fontSize: 11, color: t.textMuted, marginTop: 4 }}>Cours actuel : 1 TON ≈ {tonRate.ton_usd} $</div>
               </div>
             )}
+            {!TON_MERCHANT && (
+              <div style={{ marginBottom: 12, padding: "12px 14px", background: t.warn, borderRadius: 12, border: `1px solid ${t.warnBorder}` }}>
+                <div style={{ fontWeight: 700, fontSize: 13, color: "#E17055" }}>Paiement TON indisponible</div>
+                <div style={{ fontFamily: "'Inter',sans-serif", fontSize: 12, color: t.textSec, marginTop: 4 }}>L'adresse wallet marchand n'est pas encore configurée.</div>
+              </div>
+            )}
             {!tonAddress ? (
               <div style={{ display: "flex", justifyContent: "center" }}>
                 <TonConnectButton style={{ margin: 0 }} />
@@ -214,10 +220,7 @@ export default function CartView({ cart, totalXof, pay, setPay, rm, updQty, chec
                 alert("Cours TON indisponible. Réessaie dans un instant.");
                 return;
               }
-              if (!TON_MERCHANT) {
-                alert("Paiement TON non configuré. Configure VITE_TON_MERCHANT_ADDRESS.");
-                return;
-              }
+              if (!TON_MERCHANT) return;
               setTonLoading(true);
               try {
                 const amountTon = tonRate.amount_ton;
@@ -236,8 +239,8 @@ export default function CartView({ cart, totalXof, pay, setPay, rm, updQty, chec
               await checkout();
             }
           }}
-          disabled={(pay === "ton" && (!tonAddress || tonLoading || !tonRate?.amount_ton)) || (pay === "stars" && starsLoading) || (pay === "momo" && checkoutLoading)}
-          style={{ width: "100%", padding: 17, background: pay === "ton" ? "linear-gradient(135deg,#0098EA,#0078C8)" : pay === "momo" ? "linear-gradient(135deg,#FF6600,#E85D00)" : "linear-gradient(135deg,#FF3B5C,#E02D50)", color: "#fff", border: "none", borderRadius: 16, fontWeight: 700, fontSize: 16, cursor: (pay === "ton" && (!tonAddress || tonLoading || !tonRate?.amount_ton)) || (pay === "stars" && starsLoading) || (pay === "momo" && checkoutLoading) ? "not-allowed" : "pointer", fontFamily: "'Poppins',sans-serif", letterSpacing: 0.5, boxShadow: pay === "ton" ? "0 6px 20px rgba(0,152,234,0.28)" : pay === "momo" ? "0 6px 20px rgba(255,102,0,0.28)" : "0 6px 20px rgba(255,59,92,0.28)", opacity: (pay === "ton" && (!tonAddress || tonLoading || !tonRate?.amount_ton)) || (pay === "stars" && starsLoading) || (pay === "momo" && checkoutLoading) ? 0.7 : 1 }}>
+          disabled={(pay === "ton" && (!tonAddress || tonLoading || !tonRate?.amount_ton || !TON_MERCHANT)) || (pay === "stars" && starsLoading) || (pay === "momo" && checkoutLoading)}
+          style={{ width: "100%", padding: 17, background: pay === "ton" ? "linear-gradient(135deg,#0098EA,#0078C8)" : pay === "momo" ? "linear-gradient(135deg,#FF6600,#E85D00)" : "linear-gradient(135deg,#FF3B5C,#E02D50)", color: "#fff", border: "none", borderRadius: 16, fontWeight: 700, fontSize: 16, cursor: (pay === "ton" && (!tonAddress || tonLoading || !tonRate?.amount_ton || !TON_MERCHANT)) || (pay === "stars" && starsLoading) || (pay === "momo" && checkoutLoading) ? "not-allowed" : "pointer", fontFamily: "'Poppins',sans-serif", letterSpacing: 0.5, boxShadow: pay === "ton" ? "0 6px 20px rgba(0,152,234,0.28)" : pay === "momo" ? "0 6px 20px rgba(255,102,0,0.28)" : "0 6px 20px rgba(255,59,92,0.28)", opacity: (pay === "ton" && (!tonAddress || tonLoading || !tonRate?.amount_ton || !TON_MERCHANT)) || (pay === "stars" && starsLoading) || (pay === "momo" && checkoutLoading) ? 0.7 : 1 }}>
           {pay === "ton" ? (tonLoading ? "Envoi en cours…" : tonAddress && tonRate ? `Payer ≈ ${tonRate.amount_ton.toFixed(4)} TON (${XOF_FMT(totalXof)})` : "Connecte ton wallet") : pay === "momo" ? (checkoutLoading ? "Enregistrement…" : "Confirmer le paiement") : pay === "stars" ? (starsLoading ? "Ouverture paiement…" : tgWebApp ? `Payer ${XOF_FMT(totalXof)} en Stars` : "Confirmer sans paiement") : "Confirmer"}
         </button>
       </div>

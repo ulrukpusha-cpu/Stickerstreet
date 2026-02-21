@@ -29,6 +29,7 @@ WEBAPP_URL = os.getenv("STICKERSTREET_WEBAPP", "https://stickerstreet.vercel.app
 _admin_ids = os.getenv("ADMIN_TELEGRAM_ID", "")
 ADMIN_TELEGRAM_IDS = [str(x).strip() for x in _admin_ids.split(",") if x.strip()]
 ADMIN_API_KEY = os.getenv("ADMIN_API_KEY", "").strip()
+_admin_user_ids = [int(x) for x in ADMIN_TELEGRAM_IDS if x.isdigit()]
 
 logging.basicConfig(
     format="%(asctime)s - %(name)s - %(levelname)s - %(message)s",
@@ -442,6 +443,14 @@ async def admin_chat_reply(update: Update, context: ContextTypes.DEFAULT_TYPE):
         await update.message.reply_text("❌ Erreur envoi. Vérifie que l'API est accessible.")
 
 
+async def _fallback_text(update: Update, context: ContextTypes.DEFAULT_TYPE):
+    """Message texte non capturé — redirige vers les commandes."""
+    await update.message.reply_text(
+        "💡 Utilise les commandes pour naviguer :\n"
+        "/start · /catalog · /order · /orders · /support"
+    )
+
+
 async def callback_handler(update: Update, context: ContextTypes.DEFAULT_TYPE):
     data = update.callback_query.data
     if data == "order_confirm":
@@ -493,7 +502,12 @@ def main():
     app.add_handler(CommandHandler("order", order_start))
     app.add_handler(CommandHandler("orders", my_orders))
     app.add_handler(CommandHandler("support", support))
-    app.add_handler(MessageHandler(filters.TEXT & ~filters.COMMAND, admin_chat_reply))
+    if _admin_user_ids:
+        app.add_handler(MessageHandler(
+            filters.TEXT & ~filters.COMMAND & filters.User(user_id=_admin_user_ids),
+            admin_chat_reply,
+        ))
+    app.add_handler(MessageHandler(filters.TEXT & ~filters.COMMAND, _fallback_text))
     app.add_handler(CallbackQueryHandler(callback_handler))
 
     print("🤖 Bot StickerStreet en cours d'exécution...")

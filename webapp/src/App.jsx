@@ -145,17 +145,11 @@ export default function App() {
   useEffect(() => {
     fetchProducts()
       .then((apiProducts) => {
-        const merged = apiProducts.map((ap) => {
-          const local = PRODUCTS.find((p) => p.id === ap.id);
-          return withVisuals({
-            ...ap,
-            pricesBySize: ap.pricesBySize ?? local?.pricesBySize,
-            img: ap.img ?? local?.img,
-            grad: ap.grad ?? local?.grad,
-            visuals: ap.visuals ?? local?.visuals ?? (local?.img ? [local.img] : []),
-          });
-        });
-        setProducts(merged.length ? merged : PRODUCTS.map(withVisuals));
+        if (apiProducts?.length) {
+          setProducts(apiProducts.map(withVisuals));
+        } else {
+          setProducts(PRODUCTS.map(withVisuals));
+        }
       })
       .catch(() => setProducts(PRODUCTS.map(withVisuals)));
   }, []);
@@ -397,7 +391,7 @@ export default function App() {
                 const v = e.target.value.replace(/\D/g, "");
                 setPin(v);
                 if (v.length === 4) {
-                  if (v === adminPin) { setIsAdmin(true); setShowPin(false); setPin(""); go("admin"); notify("Mode admin activé 🔓"); }
+                  if (v === adminPin) { setIsAdmin(true); setShowPin(false); setPin(""); go("admin"); notify(adminPin === "1234" ? "⚠️ PIN par défaut ! Change-le dans Admin → Réglages" : "Mode admin activé 🔓"); }
                   else { setPin(""); notify("Code incorrect ❌"); }
                 }
               }}
