@@ -1,0 +1,35 @@
+{
+  "products": [
+    {"id": 1, "name": "Skull Graffiti", "cat": "stickers", "price": 2.5, "ton": 0.4, "xof": 1500, "emoji": "💀", "grad": "linear-gradient(135deg, #FF6B6B, #EE5A24)", "sizes": ["5×5cm","8×8cm","10×10cm"], "desc": "Sticker crâne style graffiti, vinyle haute qualité résistant UV", "custom": true},
+    {"id": 2, "name": "Pack Urban Mix", "cat": "stickers", "price": 8.0, "ton": 1.2, "xof": 5000, "emoji": "🎨", "grad": "linear-gradient(135deg, #A29BFE, #6C5CE7)", "sizes": ["5×5cm","8×8cm"], "desc": "Pack de 10 stickers urbains assortis, designs exclusifs", "custom": false},
+    {"id": 3, "name": "Tag Personnalisé", "cat": "stickers", "price": 3.5, "ton": 0.5, "xof": 2000, "emoji": "✏️", "grad": "linear-gradient(135deg, #FFEAA7, #FDCB6E)", "sizes": ["5×5cm","8×8cm","10×10cm","15×15cm"], "desc": "Ton propre tag transformé en sticker premium vinyle", "custom": true},
+    {"id": 4, "name": "Flyer Event A5", "cat": "flyers", "price": 15.0, "ton": 2.3, "xof": 9000, "emoji": "📄", "grad": "linear-gradient(135deg, #55EFC4, #00B894)", "sizes": ["A5","A4"], "desc": "100 flyers A5 recto, papier 350g mat toucher velours", "custom": true},
+    {"id": 5, "name": "Flyer Promo A4", "cat": "flyers", "price": 25.0, "ton": 3.8, "xof": 15000, "emoji": "📰", "grad": "linear-gradient(135deg, #74B9FF, #0984E3)", "sizes": ["A4","A3"], "desc": "100 flyers A4 recto/verso, papier glacé 400g premium", "custom": true},
+    {"id": 6, "name": "Holo Sticker", "cat": "stickers", "price": 4.0, "ton": 0.6, "xof": 2500, "emoji": "✨", "grad": "linear-gradient(135deg, #FD79A8, #E84393)", "sizes": ["5×5cm","8×8cm"], "desc": "Sticker holographique effet rainbow iridescent", "custom": true},
+    {"id": 7, "name": "Mega Pack Flyers", "cat": "flyers", "price": 45.0, "ton": 6.8, "xof": 27000, "emoji": "📦", "grad": "linear-gradient(135deg, #FAB1A0, #E17055)", "sizes": ["A5","A4","A3"], "desc": "500 flyers, choix du format et finition pro", "custom": true},
+    {"id": 8, "name": "Die-Cut Premium", "cat": "stickers", "price": 5.0, "ton": 0.75, "xof": 3000, "emoji": "⭐", "grad": "linear-gradient(135deg, #00CEC9, #00B894)", "sizes": ["Custom"], "desc": "Sticker découpé à la forme, vinyle premium waterproof", "custom": true},
+    {"id": 9, "name": "Menu Restaurant", "cat": "flyers", "price": 20.0, "ton": 3.0, "xof": 12000, "emoji": "🍽️", "grad": "linear-gradient(135deg, #D4A574, #8B6914)", "sizes": ["A5","A4","A3","Triptyque"], "desc": "Menu personnalisé pour restaurant, papier premium mat ou glacé", "custom": true},
+    {"id": 10, "name": "Carte Classique", "cat": "cartes", "price": 12.0, "ton": 1.8, "xof": 7000, "emoji": "🪪", "grad": "linear-gradient(135deg, #636E72, #2D3436)", "sizes": ["85×55mm","90×50mm"], "desc": "100 cartes de visite recto/verso, papier 350g couché mat", "custom": true},
+    {"id": 11, "name": "Carte Premium", "cat": "cartes", "price": 22.0, "ton": 3.3, "xof": 13000, "emoji": "💼", "grad": "linear-gradient(135deg, #B8860B, #DAA520)", "sizes": ["85×55mm","90×50mm"], "desc": "100 cartes de visite finition soft touch + dorure à chaud", "custom": true},
+    {"id": 12, "name": "Carte Ronde", "cat": "cartes", "price": 18.0, "ton": 2.7, "xof": 11000, "emoji": "⚪", "grad": "linear-gradient(135deg, #DFE6E9, #B2BEC3)", "sizes": ["55mm","65mm"], "desc": "100 cartes de visite rondes originales, impression HD", "custom": true},
+    {"id": 13, "name": "Pack Pro 500", "cat": "cartes", "price": 35.0, "ton": 5.3, "xof": 21000, "emoji": "📇", "grad": "linear-gradient(135deg, #0C2461, #1E3799)", "sizes": ["85×55mm","90×50mm","Custom"], "desc": "500 cartes de visite, choix de finition et papier premium", "custom": true}
+  ],
+  "orders": [
+    {"id": "ORD-2847", "items": [{"id": 1, "name": "Skull Graffiti", "emoji": "💀", "qty": 3, "sz": "8×8cm", "price": 2.5, "ton": 0.4, "xof": 1500}], "total": 7.5, "totalXof": 4500, "status": "production", "date": "2026-02-10", "telegram_user_id": null},
+    {"id": "ORD-2701", "items": [{"id": 4, "name": "Flyer Event A5", "emoji": "📄", "qty": 1, "sz": "A5", "price": 15.0, "ton": 2.3, "xof": 9000}], "total": 15.0, "totalXof": 9000, "status": "shipped", "date": "2026-02-08", "telegram_user_id": null}
+  ],
+  "statuses": {
+    "pending": {"label": "En attente", "color": "#F59E0B", "icon": "⏳"},
+    "confirmed": {"label": "Confirmée", "color": "#00B894", "icon": "✅"},
+    "production": {"label": "En production", "color": "#E17055", "icon": "🔧"},
+    "shipped": {"label": "Expédiée", "color": "#0984E3", "icon": "📦"},
+    "delivered": {"label": "Livrée", "color": "#00CEC9", "icon": "🎉"}
+  },
+  "momo": [
+    {"id": "moov", "name": "Moov Money", "num": "0171476415", "color": "#0066CC", "logo": "🔵"},
+    {"id": "orange", "name": "Orange Money", "num": "0714441413", "color": "#FF6600", "logo": "🟠"},
+    {"id": "mtn", "name": "MTN MoMo", "num": "0564173232", "color": "#FFCC00", "logo": "🟡"},
+    {"id": "wave", "name": "Wave", "num": "0709393959", "color": "#F7931A", "logo": "💸"},
+    {"id": "djamo", "name": "Djamo", "num": "0709393959", "color": "#00D26A", "logo": "💳", "link": "https://pay.djamo.com/pkbyg"}
+  ]
+}
