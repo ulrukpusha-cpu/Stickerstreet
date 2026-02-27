@@ -11,10 +11,11 @@ const ChatView = lazy(() => import("./components/ChatView"));
 const ProfilView = lazy(() => import("./components/ProfilView"));
 const AdminView = lazy(() => import("./components/AdminView"));
 const AddToHomeScreen = lazy(() => import("./components/AddToHomeScreen"));
+const FavoritesView = lazy(() => import("./components/FavoritesView"));
 import { PRODUCTS } from "./data/products";
 import { getPriceForSize } from "./utils/productPrice";
 
-const VALID_VIEWS = ["home", "profil", "orders", "chat", "cart", "admin", "product"];
+const VALID_VIEWS = ["home", "profil", "orders", "chat", "cart", "admin", "product", "favorites"];
 
 function getViewFromUrl() {
   const hash = (window.location.hash || "#/").replace(/^#\/?/, "").toLowerCase();
@@ -79,6 +80,16 @@ export default function App() {
       return s ? JSON.parse(s) : { name: "", phone: "", address: "" };
     } catch {
       return { name: "", phone: "", address: "" };
+    }
+  });
+  const [favorites, setFavorites] = useState(() => {
+    try {
+      const s = localStorage.getItem("stickerstreet_favorites");
+      if (!s) return [];
+      const arr = JSON.parse(s);
+      return Array.isArray(arr) ? arr : [];
+    } catch {
+      return [];
     }
   });
   const longPress = useRef(null);
@@ -177,6 +188,20 @@ export default function App() {
       localStorage.setItem("stickerstreet_cart", JSON.stringify(cart));
     } catch {}
   }, [cart]);
+
+  useEffect(() => {
+    try {
+      localStorage.setItem("stickerstreet_favorites", JSON.stringify(favorites));
+    } catch {}
+  }, [favorites]);
+
+  const toggleFavorite = useCallback((productId) => {
+    setFavorites((prev) => {
+      const has = prev.includes(productId);
+      const next = has ? prev.filter((id) => id !== productId) : [...prev, productId];
+      return next;
+    });
+  }, []);
 
   useEffect(() => {
     const onStorage = (e) => {
@@ -372,6 +397,7 @@ export default function App() {
 
   return (
     <div className="app-container" style={{ fontFamily: "'Poppins',sans-serif", background: t.bg, color: t.text, minHeight: "100vh", margin: "0 auto", position: "relative", paddingTop: tgTopOffset, paddingBottom: 90, transition: "background 0.3s, color 0.3s" }}>
+      <div className="grain-overlay" aria-hidden="true" />
       <Suspense fallback={null}>
         <AddToHomeScreen theme={t} />
       </Suspense>
@@ -423,6 +449,10 @@ export default function App() {
         </div>
         <div style={{ display: "flex", alignItems: "center", gap: 8 }}>
           <button onClick={() => setDark(!dark)} style={{ background: t.bgAlt, border: "none", width: 36, height: 36, borderRadius: 11, fontSize: 16, cursor: "pointer", display: "flex", alignItems: "center", justifyContent: "center", color: dark ? "#F59E0B" : t.textSec, transition: "all 0.3s" }}>{dark ? S.sun : S.moon}</button>
+          <button onClick={() => go("favorites")} style={{ background: "none", border: "none", width: 40, height: 40, borderRadius: 12, fontSize: 20, cursor: "pointer", position: "relative", display: "flex", alignItems: "center", justifyContent: "center", color: view === "favorites" ? "#FF3B5C" : favorites.length > 0 ? "#FF3B5C" : t.textMuted, transition: "all 0.2s" }} title="Favoris">
+            {S.heart}
+            {favorites.length > 0 && <span style={{ position: "absolute", top: -2, right: -2, fontSize: 9, fontWeight: 800 }}>{favorites.length}</span>}
+          </button>
           <button onClick={() => go("cart")} style={{ background: count > 0 ? "#FF3B5C" : t.bgAlt, border: "none", width: 40, height: 40, borderRadius: 12, fontSize: 20, cursor: "pointer", position: "relative", display: "flex", alignItems: "center", justifyContent: "center", transition: "all 0.2s" }}>
             <span style={{ fontSize: 18, color: count > 0 ? "#fff" : t.text, fontWeight: 700 }}>{S.cart}</span>
             {count > 0 && <span style={{ position: "absolute", top: -5, right: -5, background: t.badgeBg, color: t.badgeColor, fontSize: 10, fontWeight: 800, width: 20, height: 20, borderRadius: "50%", display: "flex", alignItems: "center", justifyContent: "center", border: `2px solid ${t.badgeBorder}`, animation: "popIn 0.3s ease" }}>{count}</span>}
@@ -479,7 +509,8 @@ export default function App() {
                     ) : (
                       <span style={{ fontSize: 44, filter: "drop-shadow(0 4px 8px rgba(0,0,0,0.15))" }}>{p.emoji}</span>
                     )}
-                    {p.custom && <div style={{ position: "absolute", top: 10, right: 10, background: dark ? "rgba(0,0,0,0.6)" : "rgba(255,255,255,0.9)", padding: "3px 8px", borderRadius: 8, fontSize: 9, fontWeight: 700, color: "#FF3B5C", letterSpacing: 0.8 }}>PERSO</div>}
+                    <button onClick={(e) => { e.stopPropagation(); toggleFavorite(p.id); notify(favorites.includes(p.id) ? "Retiré des favoris" : "Ajouté aux favoris ♥"); }} style={{ position: "absolute", top: 8, right: 8, width: 32, height: 32, borderRadius: "50%", background: "rgba(0,0,0,0.4)", border: "none", color: favorites.includes(p.id) ? "#FF3B5C" : "rgba(255,255,255,0.9)", fontSize: 16, cursor: "pointer", display: "flex", alignItems: "center", justifyContent: "center" }} aria-label="Favoris">{favorites.includes(p.id) ? S.heart : S.heartEmpty}</button>
+                    {p.custom && <div style={{ position: "absolute", top: 10, left: 10, background: dark ? "rgba(0,0,0,0.6)" : "rgba(255,255,255,0.9)", padding: "3px 8px", borderRadius: 8, fontSize: 9, fontWeight: 700, color: "#FF3B5C", letterSpacing: 0.8 }}>PERSO</div>}
                   </div>
                   <div style={{ padding: "14px 14px 16px" }}>
                     <h3 style={{ margin: "0 0 8px", fontSize: 14, fontWeight: 700, lineHeight: 1.2, color: t.text }}>{p.name}</h3>
@@ -498,7 +529,12 @@ export default function App() {
 
         {view === "product" && prod && (
           <Suspense fallback={<LoadingFallback />}>
-            <ProductView p={prod} addCart={addCart} design={design} setDesign={setDesign} label={label} qBtn={qBtn} card={card} t={t} />
+            <ProductView p={prod} addCart={addCart} design={design} setDesign={setDesign} label={label} qBtn={qBtn} card={card} t={t} isFavorite={favorites.includes(prod.id)} toggleFavorite={() => toggleFavorite(prod.id)} />
+          </Suspense>
+        )}
+        {view === "favorites" && (
+          <Suspense fallback={<LoadingFallback />}>
+            <FavoritesView products={products} favorites={favorites} toggleFavorite={toggleFavorite} onProductSelect={(p) => go("product", p)} go={go} title={titleStyle} card={card} t={t} />
           </Suspense>
         )}
         {view === "cart" && (

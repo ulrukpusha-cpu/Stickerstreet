@@ -3,7 +3,7 @@ export const S = {
   send: "➤", back: "‹", plus: "+", close: "✕", upload: "⇧", check: "✓",
   lock: "◆", unlock: "◇", phone: "▣", pin: "◈", bell: "△", box: "▢",
   star: "★", diamond: "◆", fire: "●", tag: "◇", clipboard: "☰",
-  sun: "☀", moon: "☽",
+  sun: "☀", moon: "☽", heart: "♥", heartEmpty: "♡",
 };
 
 export const STATUSES = {

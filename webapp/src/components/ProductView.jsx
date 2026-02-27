@@ -2,7 +2,7 @@ import { useEffect, useMemo, useState, useRef } from "react";
 import { S, XOF_FMT } from "../data/constants";
 import { getPriceForSize } from "../utils/productPrice";
 
-export default function ProductView({ p, addCart, design, setDesign, label, qBtn, card, t }) {
+export default function ProductView({ p, addCart, design, setDesign, label, qBtn, card, t, isFavorite = false, toggleFavorite }) {
   const [sz, setSz] = useState(p.sizes[0]);
   const [qty, setQty] = useState(1);
   const [visIdx, setVisIdx] = useState(0);
@@ -34,6 +34,9 @@ export default function ProductView({ p, addCart, design, setDesign, label, qBtn
   return (
     <div style={{ animation: "fadeUp 0.3s ease" }}>
       <div style={{ background: p.img ? "#f5f5f3" : p.grad, borderRadius: 24, height: 240, marginTop: 16, position: "relative", overflow: "hidden" }}>
+        {typeof toggleFavorite === "function" && (
+          <button onClick={toggleFavorite} style={{ position: "absolute", top: 12, right: 12, zIndex: 10, width: 40, height: 40, borderRadius: "50%", border: "none", background: "rgba(0,0,0,0.45)", color: isFavorite ? "#FF3B5C" : "#fff", fontSize: 20, cursor: "pointer", display: "flex", alignItems: "center", justifyContent: "center" }} aria-label={isFavorite ? "Retirer des favoris" : "Ajouter aux favoris"}>{isFavorite ? S.heart : S.heartEmpty}</button>
+        )}
         {visuals.length > 0 ? (
           <>
             <div
