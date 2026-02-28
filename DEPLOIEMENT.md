@@ -2,16 +2,17 @@
 
 ## Pour que les changements soient visibles en production
 
-### 1. Vercel (webapp)
+### 1. Webapp (VPS)
 
-1. **Pousser le code** : `git add .` puis `git commit` puis `git push`
-2. Vercel déploie automatiquement après chaque push
-3. **Vérifier** : Dashboard Vercel → ton projet → Settings → Root Directory doit être **`webapp`** (si ton repo contient api/, bot/, webapp/)
-4. **Variables d'environnement** (Vercel → Settings → Environment Variables) :
+La webapp est servie sur le **VPS** (PM2 + serve + ngrok). Voir **webapp/DEPLOY-VPS.md** pour le détail.
+
+1. **Sur le VPS** : dans `webapp/.env`, définir au minimum :
    - `VITE_API_URL` = `https://stickerstreet-production.up.railway.app/api`
-   - `VITE_APP_URL` = ton URL Vercel (ex: https://stickerstreet.vercel.app)
+   - `VITE_APP_URL` = ton URL publique (ex: https://unjogging-socorro-lobularly.ngrok-free.dev)
    - `VITE_TON_MERCHANT_ADDRESS` = ton adresse wallet TON
    - `VITE_TELEGRAM_BOT_USERNAME` = nom de ton bot (ex: StickerStreetBot)
+2. Puis : `npm run build` et `pm2 restart stickerstreet-webapp`
+3. **Ton Connect** : si l’URL ngrok change, mettre à jour `webapp/public/tonconnect-manifest.json` avec la nouvelle URL, puis rebuild.
 
 ### 2. Railway (API)
 
@@ -32,7 +33,7 @@
 **Déployer le bot sur Railway :**
 1. Crée un nouveau service Railway → **Deploy from GitHub** → choisis ton repo
 2. **Root Directory** : `bot`
-3. **Variables d’environnement** : `TELEGRAM_BOT_TOKEN`, `STICKERSTREET_API`, `ADMIN_TELEGRAM_ID`, `STICKERSTREET_WEBAPP` (ex: `https://stickerstreet.vercel.app`)
+3. **Variables d’environnement** : `TELEGRAM_BOT_TOKEN`, `STICKERSTREET_API`, `ADMIN_TELEGRAM_ID`, `STICKERSTREET_WEBAPP` (ex: `https://unjogging-socorro-lobularly.ngrok-free.dev`)
 4. **Start Command** : `python bot.py`
 
 **Vérifier ADMIN_TELEGRAM_ID (plusieurs admins possibles) :**
@@ -71,7 +72,7 @@ Pour que « Se connecter avec Telegram » fonctionne sur la webapp :
 1. Ouvre [@BotFather](https://t.me/BotFather) sur Telegram
 2. Envoie `/setdomain`
 3. Choisis ton bot StickerStreet
-4. Ajoute le domaine : `stickerstreet.vercel.app` (ou ton domaine Vercel)
+4. Ajoute le domaine de ta webapp (ex: `unjogging-socorro-lobularly.ngrok-free.dev` pour ngrok, ou ton domaine si tu en as un)
 
 Sans ça, le bouton de connexion Telegram ne fonctionnera pas.
 

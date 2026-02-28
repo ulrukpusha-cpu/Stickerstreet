@@ -1,5 +1,6 @@
-/** URL de l'API : /api (proxied par Vite en dev, par Vercel en prod vers Railway) */
-const API = "/api";
+/** URL de l'API : VITE_API_URL en prod (VPS) pour pointer vers Railway, sinon /api (dev local) */
+const _apiBase = (import.meta.env.VITE_API_URL || "").trim().replace(/\/+$/, "");
+const API = _apiBase ? _apiBase : "/api";
 const ADMIN_API_KEY = (import.meta.env.VITE_ADMIN_API_KEY || "").trim();
 
 function adminHeaders(base = {}) {

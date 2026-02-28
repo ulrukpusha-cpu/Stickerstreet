@@ -1,11 +1,11 @@
 # Résumé des variables d'environnement – StickerStreet
 
-## webapp/ (Vercel)
+## webapp/ (VPS)
 
 | Variable | Obligatoire | Exemple | Rôle |
 |----------|-------------|---------|------|
 | `VITE_API_URL` | Oui | `https://xxx.up.railway.app/api` | URL de l’API Railway (**avec** `https://` et `/api`) |
-| `VITE_APP_URL` | Pour TON | `https://stickerstreet.vercel.app` | URL publique de la webapp (TON Connect) |
+| `VITE_APP_URL` | Pour TON | `https://unjogging-socorro-lobularly.ngrok-free.dev` | URL publique de la webapp (TON Connect) |
 | `VITE_TON_MERCHANT_ADDRESS` | Pour TON | `UQBxxxx...` | Adresse wallet TON pour recevoir les paiements |
 | `VITE_TELEGRAM_BOT_USERNAME` | Pour profil | `StickerStreetBot` | Username du bot (lien inscription via Telegram) |
 
@@ -56,4 +56,4 @@ Après modification, redéploie l’API sur Railway pour que les changements soi
 |---------|----------------------------|
 | **API** (Railway) | Redéployer (push Git ou bouton Redeploy) |
 | **Bot** (local) | Redémarrer : `python bot.py` |
-| **Webapp** (Vercel) | Redéployer (push Git) — en local, rafraîchir la page suffit |
+| **Webapp** (VPS) | Rebuild : `npm run build` puis `pm2 restart stickerstreet-webapp` |
