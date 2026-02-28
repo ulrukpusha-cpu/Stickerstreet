@@ -55,26 +55,61 @@ body {
   display: block;
 }
 
-/* Multi-plateforme : plus de largeur sur tablette et PC */
+/* Multi-interface : mobile → tablette → desktop */
 .app-container {
-  max-width: 480px;
+  max-width: 100%;
+  width: 100%;
+  margin-left: auto;
+  margin-right: auto;
+  padding-left: env(safe-area-inset-left, 0);
+  padding-right: env(safe-area-inset-right, 0);
 }
 .app-nav {
-  max-width: 480px;
+  max-width: 100%;
+  width: 100%;
+}
+@media (min-width: 480px) {
+  .app-container { max-width: 480px; }
+  .app-nav { max-width: 480px; }
 }
 @media (min-width: 640px) {
-  .app-container { max-width: 560px; }
-  .app-nav { max-width: 560px; }
+  .app-container { max-width: 600px; }
+  .app-nav { max-width: 600px; }
 }
 @media (min-width: 768px) {
-  .app-container { max-width: 640px; }
-  .app-nav { max-width: 640px; }
-}
-@media (min-width: 1024px) {
   .app-container { max-width: 720px; }
   .app-nav { max-width: 720px; }
 }
+@media (min-width: 1024px) {
+  .app-container { max-width: 960px; }
+  .app-nav { max-width: 960px; }
+}
 @media (min-width: 1280px) {
-  .app-container { max-width: 800px; }
-  .app-nav { max-width: 800px; }
+  .app-container { max-width: 1200px; }
+  .app-nav { max-width: 1200px; }
+}
+
+/* Grille produits responsive (2 → 3 → 4 → 5 colonnes) */
+.home-products-grid {
+  display: grid;
+  grid-template-columns: repeat(2, 1fr);
+  gap: 12px;
+}
+@media (min-width: 640px) {
+  .home-products-grid {
+    grid-template-columns: repeat(3, 1fr);
+    gap: 14px;
+  }
+}
+@media (min-width: 1024px) {
+  .home-products-grid {
+    grid-template-columns: repeat(4, 1fr);
+    gap: 16px;
+  }
+}
+@media (min-width: 1280px) {
+  .home-products-grid {
+    grid-template-columns: repeat(5, 1fr);
+    gap: 18px;
+  }
 }

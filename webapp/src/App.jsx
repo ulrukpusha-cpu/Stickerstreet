@@ -500,7 +500,7 @@ export default function App() {
               ))}
             </div>
 
-            <div style={{ display: "grid", gridTemplateColumns: "1fr 1fr", gap: 12 }}>
+            <div className="home-products-grid">
               {fp.map((p, i) => (
                 <div key={p.id} onClick={() => go("product", p)} style={{ ...card, overflow: "hidden", cursor: "pointer", animation: `fadeUp 0.4s ease ${i * 0.06}s both`, position: "relative" }}>
                   <div style={{ background: p.grad, height: 130, display: "flex", alignItems: "center", justifyContent: "center", position: "relative", overflow: "hidden" }}>

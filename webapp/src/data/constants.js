@@ -1,9 +1,9 @@
 export const S = {
-  cart: "⊕", shop: "◈", orders: "☰", chat: "◉", user: "◎", settings: "⚙",
+  shop: "◈", orders: "☰", chat: "◉", user: "◎", settings: "⚙",
   send: "➤", back: "‹", plus: "+", close: "✕", upload: "⇧", check: "✓",
   lock: "◆", unlock: "◇", phone: "▣", pin: "◈", bell: "△", box: "▢",
   star: "★", diamond: "◆", fire: "●", tag: "◇", clipboard: "☰",
-  sun: "☀", moon: "☽", heart: "♥", heartEmpty: "♡",
+  sun: "🌞", moon: "🌙", heart: "♥", heartEmpty: "♡", cart: "🛒",
 };
 
 export const STATUSES = {
