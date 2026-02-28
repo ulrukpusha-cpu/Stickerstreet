@@ -429,7 +429,7 @@ export default function App() {
         </div>
       )}
 
-      <header style={{ display: "flex", justifyContent: "space-between", alignItems: "center", padding: "7px 12px", background: t.headerBg, backdropFilter: "blur(20px)", position: "sticky", top: 0, zIndex: 100, borderBottom: `1px solid ${t.cardBorderLight}`, transition: "background 0.3s" }}>
+      <header className="app-header" style={{ display: "flex", justifyContent: "space-between", alignItems: "center", padding: "7px 12px", background: t.headerBg, backdropFilter: "blur(20px)", position: "fixed", top: 0, left: 0, right: 0, zIndex: 100, borderBottom: `1px solid ${t.cardBorderLight}`, transition: "background 0.3s" }}>
         <div style={{ display: "flex", alignItems: "center", gap: 12 }}>
           {view !== "home" && <button onClick={() => go("home")} style={{ background: t.bgAlt, border: "none", width: 34, height: 34, borderRadius: 10, fontSize: 20, fontWeight: 300, cursor: "pointer", display: "flex", alignItems: "center", justifyContent: "center", color: t.text }}>{S.back}</button>}
           <div
@@ -459,6 +459,7 @@ export default function App() {
           </button>
         </div>
       </header>
+      <div className="app-header-spacer" aria-hidden="true" />
 
       <main style={{ padding: "0 16px 20px", opacity: fade ? 1 : 0, transform: fade ? "translateY(0)" : "translateY(8px)", transition: "all 0.15s ease" }}>
         {view === "home" && (

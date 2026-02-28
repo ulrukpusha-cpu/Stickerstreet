@@ -25,7 +25,8 @@ except ImportError:
 app = Flask(__name__)
 
 _raw_origins = (os.environ.get("ALLOWED_ORIGINS", "") or "").strip()
-_cors_origins = [o.strip() for o in _raw_origins.split(",") if o.strip()] if _raw_origins else ["*"]
+# Normaliser sans slash final pour matcher l'en-tête Origin envoyé par le navigateur
+_cors_origins = [o.strip().rstrip("/") for o in _raw_origins.split(",") if o.strip()] if _raw_origins else ["*"]
 CORS(app, resources={r"/api/*": {
     "origins": _cors_origins,
     "methods": ["GET", "POST", "PATCH", "DELETE", "OPTIONS"],
@@ -740,6 +741,61 @@ def _create_invoice_pdf_and_store(data, order):
     return filename, pdf_bytes, invoice_number
 
 
+def _build_invoice_pdf_only(order, invoice_number=None):
+    """Construit le PDF de facture sans l'enregistrer (pour renvoi à la validation)."""
+    inv_num = invoice_number or order.get("invoice_number") or f"INV-VALID-{order.get('id', '')}"
+    lines = [
+        "StickerStreet - Facture",
+        f"Numero: {inv_num}",
+        f"Commande: {order.get('id', '-')}",
+        f"Date: {datetime.now().strftime('%Y-%m-%d %H:%M')}",
+        "",
+        f"Client: {order.get('client_name') or '-'}",
+        f"Tel: {order.get('client_phone') or '-'}",
+        f"Adresse: {order.get('client_address') or '-'}",
+        "",
+        "Articles:",
+    ]
+    for item in order.get("items", []):
+        qty = int(item.get("qty", 1))
+        line_total = int(float(item.get("xof", 0)) * qty)
+        size = item.get("sz") or "-"
+        lines.append(f"- {item.get('name', '?')} x{qty} ({size}) : {line_total} F")
+    lines += [
+        "",
+        f"Total: {int(order.get('totalXof', 0))} F CFA",
+        f"Paiement: {order.get('payment_method', 'MoMo / TON')}",
+        "",
+        "Merci pour votre confiance.",
+    ]
+    pdf_bytes = _build_simple_pdf(lines)
+    filename = f"{inv_num}_{order.get('id', 'order')}.pdf"
+    return filename, pdf_bytes
+
+
+def _get_invoice_pdf_for_order(data, order):
+    """Retourne (filename, pdf_bytes) pour une commande, ou (None, None) si indisponible."""
+    order_id = order.get("id")
+    for inv in data.get("invoices", []):
+        if inv.get("order_id") == order_id:
+            if inv.get("pdf_base64"):
+                try:
+                    pdf_bytes = base64.b64decode(inv["pdf_base64"])
+                    return (inv.get("filename") or f"invoice_{order_id}.pdf", pdf_bytes)
+                except Exception:
+                    pass
+            if inv.get("pdf_url"):
+                try:
+                    with urllib.request.urlopen(inv["pdf_url"], timeout=10) as resp:
+                        pdf_bytes = resp.read()
+                    return (inv.get("filename") or f"invoice_{order_id}.pdf", pdf_bytes)
+                except Exception:
+                    pass
+            break
+    filename, pdf_bytes = _build_invoice_pdf_only(order)
+    return (filename, pdf_bytes)
+
+
 def _multipart_build(fields, file_field, filename, file_bytes, content_type):
     boundary = "----StickerStreetBoundary" + hashlib.md5(str(time.time()).encode("utf-8")).hexdigest()
     payload = bytearray()
@@ -814,6 +870,13 @@ def update_order_status(order_id):
         if o["id"] == order_id:
             o["status"] = status
             save_data(data)
+            if status == "confirmed":
+                filename, pdf_bytes = _get_invoice_pdf_for_order(data, o)
+                if pdf_bytes:
+                    _send_telegram_document(
+                        pdf_bytes, filename,
+                        caption=f"✅ Facture validée — {o.get('id', '')}",
+                    )
             return jsonify(o)
     return jsonify({"error": "Commande introuvable"}), 404
 
