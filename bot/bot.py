@@ -277,7 +277,7 @@ async def order_confirm_callback(update: Update, context: ContextTypes.DEFAULT_T
     if order:
         context.user_data["cart"] = []
         momo = api_get("/api/momo") or []
-        momo_lines = "\n".join(f"• {op['name']} : {op['num']}" for op in momo) if momo else "• Moov : 0171476415\n• Orange : 0714441413\n• MTN : 0564173232"
+        momo_lines = "\n".join(f"• {op['name']} : {op.get('num', '—')}" for op in momo) if momo else "• Wave : 0709393959\n• Djamo : lien dans l'app"
         await q.edit_message_text(
             f"🎉 *Commande validée !*\n\n"
             f"Numéro : *{order['id']}*\n"
@@ -416,7 +416,7 @@ async def successful_payment(update: Update, context: ContextTypes.DEFAULT_TYPE)
     })
     if order:
         momo = api_get("/api/momo") or []
-        momo_lines = "\n".join(f"• {op['name']} : {op['num']}" for op in momo) if momo else "• Moov : 0171476415"
+        momo_lines = "\n".join(f"• {op['name']} : {op.get('num', '—')}" for op in momo) if momo else "• Wave : 0709393959\n• Djamo : lien dans l'app"
         await update.message.reply_text(
             f"🎉 *Paiement Stars reçu !*\n\n"
             f"Commande *{order['id']}* créée.\n"

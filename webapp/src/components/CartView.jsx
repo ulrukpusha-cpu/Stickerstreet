@@ -130,7 +130,7 @@ export default function CartView({ cart, totalXof, pay, setPay, rm, updQty, chec
               <div style={{ width: 44, height: 44, borderRadius: 14, background: "#FF660015", display: "flex", alignItems: "center", justifyContent: "center", fontSize: 24 }}>{S.phone}</div>
               <div>
                 <div style={{ fontWeight: 800, fontSize: 16 }}>Paiement Mobile Money</div>
-                <div style={{ fontFamily: "'Inter',sans-serif", fontSize: 12, color: t.textSec }}>Choisis ton opérateur (Mobile Money, Wave, Djamo) et envoie le montant</div>
+                <div style={{ fontFamily: "'Inter',sans-serif", fontSize: 12, color: t.textSec }}>Choisis Wave ou Djamo et envoie le montant</div>
               </div>
             </div>
             <div style={{ display: "flex", flexDirection: "column", gap: 8 }}>
@@ -140,23 +140,35 @@ export default function CartView({ cart, totalXof, pay, setPay, rm, updQty, chec
                     <span style={{ fontSize: 24 }}>{op.logo}</span>
                     <div>
                       <div style={{ fontWeight: 700, fontSize: 14, color: momoOp === op.id ? op.color : t.text }}>{op.name}</div>
-                      <div style={{ fontFamily: "'Inter',sans-serif", fontSize: 13, color: t.textSec, fontWeight: 500 }}>{op.link ? "Lien direct" : op.num}</div>
+                      <div style={{ fontFamily: "'Inter',sans-serif", fontSize: 13, color: t.textSec, fontWeight: 500 }}>{op.link ? "Lien direct" : op.qrImage ? "Scanner le QR" : op.num}</div>
                     </div>
                   </div>
                   {op.link ? (
                     <a href={op.link} target="_blank" rel="noopener noreferrer" onClick={(e) => e.stopPropagation()} style={{ padding: "8px 14px", borderRadius: 10, border: "none", cursor: "pointer", fontFamily: "'Poppins',sans-serif", fontWeight: 600, fontSize: 12, background: op.color + "22", color: op.color, textDecoration: "none", transition: "all 0.2s" }}>Payer →</a>
+                  ) : op.qrImage ? (
+                    <a href={op.qrImage} target="_blank" rel="noopener noreferrer" onClick={(e) => e.stopPropagation()} style={{ padding: "8px 14px", borderRadius: 10, border: "none", cursor: "pointer", fontFamily: "'Poppins',sans-serif", fontWeight: 600, fontSize: 12, background: op.color + "22", color: op.color, textDecoration: "none", transition: "all 0.2s" }}>Payer avec Wave →</a>
                   ) : (
                     <button onClick={(e) => { e.stopPropagation(); copyNum(op.num, op.id); }} style={{ padding: "8px 14px", borderRadius: 10, border: "none", cursor: "pointer", fontFamily: "'Poppins',sans-serif", fontWeight: 600, fontSize: 12, background: copied === op.id ? "#00C48C22" : t.bgAlt, color: copied === op.id ? "#00C48C" : t.textSec, transition: "all 0.2s" }}>{copied === op.id ? "✓ Copié" : "Copier"}</button>
                   )}
                 </div>
               ))}
             </div>
+            {momoList.some((op) => op.qrImage && momoOp === op.id) && (() => {
+              const waveOp = momoList.find((op) => op.qrImage && momoOp === op.id);
+              return (
+                <div style={{ marginTop: 16, padding: 16, background: (waveOp?.color || "#F7931A") + "12", borderRadius: 14, border: `2px solid ${(waveOp?.color || "#F7931A")}33", display: "flex", flexDirection: "column", alignItems: "center", gap: 12 }}>
+                  <div style={{ fontWeight: 700, fontSize: 14, color: waveOp?.color }}>Scanner le QR code Wave</div>
+                  <img src={waveOp?.qrImage} alt="QR Wave" style={{ width: 160, height: 160, objectFit: "contain", borderRadius: 12 }} />
+                  <a href={waveOp?.qrImage} target="_blank" rel="noopener noreferrer" style={{ padding: "10px 18px", borderRadius: 10, fontFamily: "'Poppins',sans-serif", fontWeight: 600, fontSize: 13, background: (waveOp?.color || "#F7931A") + "22", color: waveOp?.color, textDecoration: "none" }}>Payer avec Wave →</a>
+                </div>
+              );
+            })()}
             <div style={{ marginTop: 16, padding: "14px 16px", background: t.warn, borderRadius: 12, border: `1px solid ${t.warnBorder}` }}>
               <div style={{ fontWeight: 700, fontSize: 13, color: "#E17055", marginBottom: 8 }}>Instructions :</div>
               <div style={{ fontFamily: "'Inter',sans-serif", fontSize: 13, color: t.textSec, lineHeight: 1.6 }}>
-                1. Copie le numéro de l'opérateur choisi<br />
-                2. Envoie <span style={{ fontWeight: 700, color: t.text }}>{XOF_FMT(totalXof)}</span> au numéro<br />
-                3. Clique sur "Confirmer le paiement"<br />
+                1. Choisis <strong>Wave</strong> (scanne le QR) ou <strong>Djamo</strong> (clique sur Payer →)<br />
+                2. Envoie <span style={{ fontWeight: 700, color: t.text }}>{XOF_FMT(totalXof)}</span> via l’app Wave ou Djamo<br />
+                3. Clique sur « Confirmer le paiement »<br />
                 4. On vérifie et on lance ta commande !
               </div>
             </div>

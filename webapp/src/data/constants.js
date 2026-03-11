@@ -15,10 +15,7 @@ export const STATUSES = {
 };
 
 export const MOMO = [
-  { id: "moov", name: "Moov Money", num: "0171476415", color: "#0066CC", logo: "🔵" },
-  { id: "orange", name: "Orange Money", num: "0714441413", color: "#FF6600", logo: "🟠" },
-  { id: "mtn", name: "MTN MoMo", num: "0564173232", color: "#FFCC00", logo: "🟡" },
-  { id: "wave", name: "Wave", num: "0709393959", color: "#F7931A", logo: "💸" },
+  { id: "wave", name: "Wave", num: "0709393959", color: "#F7931A", logo: "💸", qrImage: "/wave-qr.png" },
   { id: "djamo", name: "Djamo", num: "0709393959", color: "#00D26A", logo: "💳", link: "https://pay.djamo.com/pkbyg" },
 ];
 
