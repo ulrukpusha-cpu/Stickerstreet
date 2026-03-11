@@ -70,11 +70,20 @@ _admin_ids = os.environ.get("ADMIN_TELEGRAM_ID", "")
 ADMIN_TELEGRAM_IDS = [str(x).strip() for x in _admin_ids.split(",") if x.strip()]
 ADMIN_API_KEY = (os.environ.get("ADMIN_API_KEY", "") or "").strip().strip('"').strip("'")
 
-# En local : ../shared/data.json | Sur Railway : data.json dans api/
-_SHARED = os.path.join(os.path.dirname(__file__), "..", "shared", "data.json")
-_LOCAL = os.path.join(os.path.dirname(__file__), "data.json")
-# Priorité: DATA_FILE env (ex: volume persistant Railway), sinon api/data.json, sinon shared/data.json
-DATA_FILE = (os.environ.get("DATA_FILE", "") or "").strip() or (_LOCAL if os.path.exists(_LOCAL) else _SHARED)
+# Base de données : Neon (Postgres) si DATABASE_URL est défini, sinon fichier JSON
+USE_NEON = bool((os.environ.get("DATABASE_URL") or "").strip())
+if USE_NEON:
+    from db import load_data as _neon_load, save_data as _neon_save
+    def load_data():
+        return _neon_load()
+    def save_data(data):
+        return _neon_save(data)
+else:
+    # En local : ../shared/data.json | Sur Railway : data.json dans api/
+    _SHARED = os.path.join(os.path.dirname(__file__), "..", "shared", "data.json")
+    _LOCAL = os.path.join(os.path.dirname(__file__), "data.json")
+    # Priorité: DATA_FILE env (ex: volume persistant Railway), sinon api/data.json, sinon shared/data.json
+    DATA_FILE = (os.environ.get("DATA_FILE", "") or "").strip() or (_LOCAL if os.path.exists(_LOCAL) else _SHARED)
 
 VERCEL_BLOB_UPLOAD_URL = os.environ.get("VERCEL_BLOB_UPLOAD_URL", "https://blob.vercel-storage.com").strip()
 VERCEL_BLOB_BASE_URL = os.environ.get("VERCEL_BLOB_BASE_URL", "").strip()
@@ -82,48 +91,47 @@ BLOB_READ_WRITE_TOKEN = (os.environ.get("BLOB_READ_WRITE_TOKEN", "") or "").stri
 PENDING_INVOICE_TTL_SECONDS = int(os.environ.get("PENDING_INVOICE_TTL_SECONDS", "86400") or "86400")
 
 
-def _ensure_data_file():
-    """Crée DATA_FILE si absent, en copiant un seed existant."""
-    if os.path.exists(DATA_FILE):
-        return
-    os.makedirs(os.path.dirname(DATA_FILE), exist_ok=True)
-    seed_path = _LOCAL if os.path.exists(_LOCAL) else _SHARED
-    if os.path.exists(seed_path):
-        with open(seed_path, "r", encoding="utf-8") as src:
-            seed = src.read()
-        with open(DATA_FILE, "w", encoding="utf-8") as dst:
-            dst.write(seed)
-    else:
-        # Seed minimal pour éviter crash démarrage.
-        with open(DATA_FILE, "w", encoding="utf-8") as dst:
-            json.dump(
-                {
-                    "products": [],
-                    "orders": [],
-                    "statuses": {},
-                    "momo": [],
-                    "clients": [],
-                    "chat": [],
-                    "banners": [],
-                    "invoices": [],
-                    "pending_invoices": {},
-                },
-                dst,
-                ensure_ascii=False,
-                indent=2,
-            )
+if not USE_NEON:
+    def _ensure_data_file():
+        """Crée DATA_FILE si absent, en copiant un seed existant."""
+        if os.path.exists(DATA_FILE):
+            return
+        os.makedirs(os.path.dirname(DATA_FILE), exist_ok=True)
+        seed_path = _LOCAL if os.path.exists(_LOCAL) else _SHARED
+        if os.path.exists(seed_path):
+            with open(seed_path, "r", encoding="utf-8") as src:
+                seed = src.read()
+            with open(DATA_FILE, "w", encoding="utf-8") as dst:
+                dst.write(seed)
+        else:
+            # Seed minimal pour éviter crash démarrage.
+            with open(DATA_FILE, "w", encoding="utf-8") as dst:
+                json.dump(
+                    {
+                        "products": [],
+                        "orders": [],
+                        "statuses": {},
+                        "momo": [],
+                        "clients": [],
+                        "chat": [],
+                        "banners": [],
+                        "invoices": [],
+                        "pending_invoices": {},
+                    },
+                    dst,
+                    ensure_ascii=False,
+                    indent=2,
+                )
 
+    def load_data():
+        _ensure_data_file()
+        with open(DATA_FILE, "r", encoding="utf-8") as f:
+            return json.load(f)
 
-def load_data():
-    _ensure_data_file()
-    with open(DATA_FILE, "r", encoding="utf-8") as f:
-        return json.load(f)
-
-
-def save_data(data):
-    _ensure_data_file()
-    with open(DATA_FILE, "w", encoding="utf-8") as f:
-        json.dump(data, f, ensure_ascii=False, indent=2)
+    def save_data(data):
+        _ensure_data_file()
+        with open(DATA_FILE, "w", encoding="utf-8") as f:
+            json.dump(data, f, ensure_ascii=False, indent=2)
 
 
 @app.route("/api/products", methods=["GET"])
@@ -1269,7 +1277,12 @@ def health():
         warnings.append("flask-limiter non installé — rate limiting désactivé")
     if _cors_origins == ["*"]:
         warnings.append("ALLOWED_ORIGINS non défini — CORS ouvert à tous les domaines")
-    return jsonify({"status": "ok", "service": "stickerstreet-api", "warnings": warnings})
+    return jsonify({
+        "status": "ok",
+        "service": "stickerstreet-api",
+        "database": "neon" if USE_NEON else "file",
+        "warnings": warnings,
+    })
 
 
 def _send_telegram(text):

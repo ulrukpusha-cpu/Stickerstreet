@@ -22,6 +22,7 @@
 |----------|------------------------|-------------|
 | `TELEGRAM_BOT_TOKEN` | Oui (chat + Stars) | Token du bot (chat, paiement Telegram Stars) |
 | `ADMIN_TELEGRAM_ID` | Oui (chat) | ID Telegram de l'admin (pour recevoir les messages clients) |
+| `DATABASE_URL` | Optionnel | Connection string **Neon** (Postgres) ; si défini, l’API utilise Neon au lieu du fichier JSON. Voir [NEON.md](NEON.md). |
 
 Railway définit automatiquement `PORT`. Optionnel : `FLASK_DEBUG` = `true`
 
