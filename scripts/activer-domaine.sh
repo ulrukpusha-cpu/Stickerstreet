@@ -126,13 +126,13 @@ PY
 
 say "6. Rebuild webapp + redémarrage API et bot"
 (cd "$APP/webapp" && npm run build >/dev/null 2>&1) && echo "✅ webapp reconstruite"
-pm2 restart stickerstreet-api stickerstreet-bot --update-env >/dev/null && sleep 4
+pm2 restart stickerstreet-api stickerstreet-bot --update-env >/dev/null && sleep 10
 
 say "7. Vérifications"
-curl -s -o /dev/null -w "  $URL → %{http_code}\n" "$URL/"
-curl -s -o /dev/null -w "  $URL/api/products → %{http_code}\n" "$URL/api/products"
-curl -s -o /dev/null -w "  http://$DOMAIN → %{http_code} (redirection attendue 301)\n" "http://$DOMAIN/"
-curl -s -o /dev/null -w "  https://$WWW → %{http_code} (redirection attendue 301)\n" "https://$WWW/"
+curl -s -m 15 -o /dev/null -w "  $URL → %{http_code}\n" "$URL/" || true
+curl -s -m 15 -o /dev/null -w "  $URL/api/products → %{http_code}\n" "$URL/api/products" || true
+curl -s -m 15 -o /dev/null -w "  http://$DOMAIN → %{http_code} (redirection attendue 301)\n" "http://$DOMAIN/" || true
+curl -s -m 15 -o /dev/null -w "  https://$WWW → %{http_code} (redirection attendue 301)\n" "https://$WWW/" || true
 echo
 echo "🎉 $URL est en ligne. Reste à faire dans Telegram (@BotFather) :"
 echo "   /setdomain → @StickerStreetbot → $DOMAIN   (bouton « Se connecter avec Telegram » du site)"
