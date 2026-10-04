@@ -92,10 +92,8 @@ except Exception as e:
 
 public = current("PUBLIC_APP_URL") or "https://stickerstreet.ci"
 print(f"""
-Dernière étape dans le Cockpit Jèko → Paramètres → API & Webhooks → Webhook :
-   URL : {public}/api/webhooks/jeko
-   Événement : TRANSACTION_COMPLETED
-⚠️ Si le Cockpit ne permet qu'UN webhook pour tout le compte, NE REMPLACE PAS celui de Bipbiprecharge :
-   demande à Jèko (hello@jeko.africa) un webhook par boutique, ou un compte séparé pour StickerStreet.
-   En attendant, l'app vérifie elle-même le statut auprès de Jèko au retour du client.
+Dernière étape dans le Cockpit Jèko → Paramètres → API & Webhooks → « Webhooks par magasin » → Ajouter :
+   Magasin : StickerStreet
+   URL     : {public}/api/webhooks/jeko
+⚠️ Ne touche PAS au « Webhook business (global) » : il sert à Bipbiprecharge (une seule souscription possible).
 (Quand stickerstreet.ci sera en ligne, remplace l'URL par https://stickerstreet.ci/api/webhooks/jeko)""")
