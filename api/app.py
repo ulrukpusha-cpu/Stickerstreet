@@ -100,6 +100,10 @@ TELEGRAM_BOT_TOKEN = os.environ.get("TELEGRAM_BOT_TOKEN", "")
 _admin_ids = os.environ.get("ADMIN_TELEGRAM_ID", "")
 ADMIN_TELEGRAM_IDS = [str(x).strip() for x in _admin_ids.split(",") if x.strip()]
 ADMIN_API_KEY = (os.environ.get("ADMIN_API_KEY", "") or "").strip().strip('"').strip("'")
+# Bot réservé à l'équipe (notifications, support, statuts). Sans lui, le bot client sert de repli.
+ADMIN_BOT_TOKEN = (os.environ.get("ADMIN_BOT_TOKEN", "") or "").strip().strip('"').strip("'")
+STAFF_ROLES = {"admin": "Admin", "employe": "Employé"}
+STAFF_INVITE_TTL = 24 * 3600
 
 # Secret de session : SESSION_SECRET, sinon dérivé du token bot (change si le token est révoqué).
 _session_secret = (os.environ.get("SESSION_SECRET", "") or "").strip()
@@ -256,11 +260,26 @@ def _has_admin_key():
     return bool(incoming) and hmac.compare_digest(incoming, ADMIN_API_KEY)
 
 
+def _staff_role(uid, data=None):
+    """'owner' (ADMIN_TELEGRAM_ID), 'admin', 'employe' ou None."""
+    uid = str(uid or "")
+    if not uid:
+        return None
+    if uid in ADMIN_TELEGRAM_IDS:
+        return "owner"
+    try:
+        staff = (data or load_data()).get("staff", [])
+    except Exception:
+        return None
+    member = next((m for m in staff if str(m.get("telegram_user_id")) == uid), None)
+    return member.get("role") if member else None
+
+
 def _is_admin():
     if _has_admin_key():
         return True
     uid = _session_user_id()
-    return bool(uid and uid in ADMIN_TELEGRAM_IDS)
+    return _staff_role(uid) in ("owner", "admin")
 
 
 def _require_admin_api_key():
@@ -982,7 +1001,7 @@ def _notify_admin_new_order(order, payment=None):
     )
     if order.get("payment_note"):
         msg += f"\n⚠️ {e(order['payment_note'])}"
-    _send_telegram(msg)
+    _send_telegram(msg, reply_markup=_order_status_buttons(order.get("id")))
 
 
 def _pdf_escape(text):
@@ -1129,19 +1148,24 @@ def _multipart_build(fields, file_field, filename, file_bytes, content_type):
     return boundary, bytes(payload)
 
 
-def _send_telegram_document(file_bytes, filename, caption=""):
-    """Envoie un PDF aux admins Telegram."""
-    if not TELEGRAM_BOT_TOKEN or not ADMIN_TELEGRAM_IDS:
-        return
-    url = f"https://api.telegram.org/bot{TELEGRAM_BOT_TOKEN}/sendDocument"
-    for chat_id in ADMIN_TELEGRAM_IDS:
+def _send_telegram_document(file_bytes, filename, caption="", content_type="application/pdf", parse_mode=None):
+    """Envoie un fichier à toute l'équipe (bot admin, ou bot client en repli)."""
+    token = _staff_bot_token()
+    if not token:
+        return 0
+    url = f"https://api.telegram.org/bot{token}/sendDocument"
+    sent = 0
+    for chat_id in _staff_recipients():
         try:
+            fields = {"chat_id": chat_id, "caption": caption[:1024]}
+            if parse_mode:
+                fields["parse_mode"] = parse_mode
             boundary, body = _multipart_build(
-                fields={"chat_id": chat_id, "caption": caption[:1024]},
+                fields=fields,
                 file_field="document",
                 filename=filename,
                 file_bytes=file_bytes,
-                content_type="application/pdf",
+                content_type=content_type,
             )
             req = urllib.request.Request(
                 url,
@@ -1149,9 +1173,11 @@ def _send_telegram_document(file_bytes, filename, caption=""):
                 method="POST",
                 headers={"Content-Type": f"multipart/form-data; boundary={boundary}"},
             )
-            urllib.request.urlopen(req, timeout=15)
+            urllib.request.urlopen(req, timeout=30)
+            sent += 1
         except Exception as e:
             app.logger.warning(f"Telegram sendDocument failed for {chat_id}: {type(e).__name__}")
+    return sent
 
 
 def _cleanup_expired_pending_invoices(data):
@@ -1785,35 +1811,67 @@ def health():
     })
 
 
-def _telegram_send_message(chat_id, text):
-    req_data = urllib.parse.urlencode({"chat_id": chat_id, "text": text, "parse_mode": "HTML"}).encode()
+def _staff_bot_token():
+    return ADMIN_BOT_TOKEN or TELEGRAM_BOT_TOKEN
+
+
+def _staff_recipients():
+    """Propriétaire(s) + membres de l'équipe (sans doublon)."""
+    ids = list(ADMIN_TELEGRAM_IDS)
+    try:
+        for m in load_data().get("staff", []):
+            uid = str(m.get("telegram_user_id") or "")
+            if uid and uid not in ids:
+                ids.append(uid)
+    except Exception as e:
+        app.logger.warning(f"Liste de l'équipe indisponible, envoi au propriétaire seul : {type(e).__name__}")
+    return ids
+
+
+def _order_status_buttons(order_id):
+    """Boutons de statut sous les notifications de commande (gérés par le bot admin)."""
+    if not ADMIN_BOT_TOKEN:
+        return None
+    b = lambda label, st: {"text": label, "callback_data": f"st:{order_id}:{st}"[:64]}
+    return {"inline_keyboard": [[b("✅ Confirmer", "confirmed"), b("🖨 Production", "production")],
+                                [b("📦 Expédiée", "shipped"), b("🎉 Livrée", "delivered")]]}
+
+
+def _telegram_send_message(chat_id, text, token=None, reply_markup=None):
+    fields = {"chat_id": chat_id, "text": text, "parse_mode": "HTML", "disable_web_page_preview": "true"}
+    if reply_markup:
+        fields["reply_markup"] = json.dumps(reply_markup)
+    req_data = urllib.parse.urlencode(fields).encode()
     req = urllib.request.Request(
-        f"https://api.telegram.org/bot{TELEGRAM_BOT_TOKEN}/sendMessage",
+        f"https://api.telegram.org/bot{token or TELEGRAM_BOT_TOKEN}/sendMessage",
         data=req_data, method="POST",
         headers={"Content-Type": "application/x-www-form-urlencoded"},
     )
     urllib.request.urlopen(req, timeout=5)
 
 
-def _send_telegram(text):
-    """Envoie un message aux admins via Telegram."""
-    if not TELEGRAM_BOT_TOKEN or not ADMIN_TELEGRAM_IDS:
+def _send_telegram(text, reply_markup=None):
+    """Envoie un message à toute l'équipe, via le bot admin (ou le bot client en repli)."""
+    token = _staff_bot_token()
+    if not token:
         return
-    for chat_id in ADMIN_TELEGRAM_IDS:
+    for chat_id in _staff_recipients():
         try:
-            _telegram_send_message(chat_id, text)
+            _telegram_send_message(chat_id, text, token=token, reply_markup=reply_markup)
         except Exception as e:
             app.logger.warning(f"Telegram send failed for {chat_id}: {type(e).__name__}")
 
 
 def _send_telegram_to(chat_id, text):
-    """Message à un client (best effort : il doit avoir démarré le bot)."""
+    """Message à un client via le bot CLIENT (best effort : il doit avoir démarré le bot)."""
     if not TELEGRAM_BOT_TOKEN or not chat_id:
-        return
+        return False
     try:
-        _telegram_send_message(chat_id, text)
+        _telegram_send_message(chat_id, text, token=TELEGRAM_BOT_TOKEN)
+        return True
     except Exception as e:
         app.logger.info(f"Telegram message to client {chat_id} failed: {type(e).__name__}")
+        return False
 
 
 # ==================== Chat support (un fil par client) ====================
@@ -1875,7 +1933,120 @@ def post_chat_reply():
         thread = data.setdefault("chats", {}).setdefault(uid, [])
         thread.append({"from": "bot", "text": text, "time": datetime.now().strftime("%H:%M"), "ts": int(time.time())})
         del thread[:-200]
+    delivered = None
+    if body.get("deliver"):
+        # Le bot admin ne peut pas écrire au client : c'est le bot client qui transmet la réponse
+        delivered = _send_telegram_to(uid, f"💬 <b>Support StickerStreet</b>\n\n{html.escape(text)}")
+    return jsonify({"ok": True, "delivered": delivered})
+
+
+# ==================== Équipe (bot admin) ====================
+
+def _staff_public(m):
+    return {k: m.get(k) for k in ("telegram_user_id", "name", "username", "role", "added_at", "added_by")}
+
+
+@app.route("/api/staff", methods=["GET"])
+def list_staff():
+    auth_err = _require_bot_key()
+    if auth_err:
+        return auth_err
+    data = load_data()
+    return jsonify({"owners": ADMIN_TELEGRAM_IDS, "staff": [_staff_public(m) for m in data.get("staff", [])]})
+
+
+@app.route("/api/staff/role/<uid>", methods=["GET"])
+def staff_role(uid):
+    auth_err = _require_bot_key()
+    if auth_err:
+        return auth_err
+    return jsonify({"telegram_user_id": uid, "role": _staff_role(uid)})
+
+
+@app.route("/api/staff/invites", methods=["POST"])
+def create_staff_invite():
+    """Lien d'invitation à usage unique (24 h). Le bot admin vérifie que le demandeur peut inviter."""
+    auth_err = _require_bot_key()
+    if auth_err:
+        return auth_err
+    body = request.get_json(silent=True) or {}
+    role = str(body.get("role") or "employe")
+    if role not in STAFF_ROLES:
+        return jsonify({"error": "Rôle invalide (admin ou employe)"}), 400
+    code = os.urandom(9).hex()
+    with data_tx() as data:
+        invites = data.setdefault("staff_invites", {})
+        now = int(time.time())
+        for c in [c for c, v in invites.items() if int(v.get("expires_ts", 0)) < now]:
+            invites.pop(c, None)
+        invites[code] = {"role": role, "created_by": str(body.get("created_by") or ""), "expires_ts": now + STAFF_INVITE_TTL}
+    return jsonify({"code": code, "role": role, "expires_in": STAFF_INVITE_TTL}), 201
+
+
+@app.route("/api/staff/join", methods=["POST"])
+def join_staff():
+    auth_err = _require_bot_key()
+    if auth_err:
+        return auth_err
+    body = request.get_json(silent=True) or {}
+    code, uid = str(body.get("code") or ""), str(body.get("telegram_user_id") or "")
+    if not code or not uid:
+        return jsonify({"error": "Code et utilisateur requis"}), 400
+    with data_tx() as data:
+        invite = data.setdefault("staff_invites", {}).pop(code, None)
+        if not invite or int(invite.get("expires_ts", 0)) < int(time.time()):
+            return jsonify({"error": "Invitation invalide, déjà utilisée ou expirée"}), 404
+        if uid in ADMIN_TELEGRAM_IDS:
+            return jsonify({"error": "Tu es déjà propriétaire"}), 409
+        staff = data.setdefault("staff", [])
+        member = next((m for m in staff if str(m.get("telegram_user_id")) == uid), None)
+        if not member:
+            member = {"telegram_user_id": _uid_value(uid)}
+            staff.append(member)
+        member.update({
+            "name": _clip(body.get("name"), 80), "username": _clip(body.get("username"), 64),
+            "role": invite["role"], "added_by": invite.get("created_by"),
+            "added_at": datetime.now().isoformat(timespec="seconds"),
+        })
+    return jsonify(_staff_public(member)), 201
+
+
+@app.route("/api/staff/<uid>", methods=["DELETE"])
+def remove_staff(uid):
+    auth_err = _require_bot_key()
+    if auth_err:
+        return auth_err
+    if str(uid) in ADMIN_TELEGRAM_IDS:
+        return jsonify({"error": "Le propriétaire ne peut pas être retiré"}), 400
+    with data_tx() as data:
+        staff = data.setdefault("staff", [])
+        before = len(staff)
+        data["staff"] = [m for m in staff if str(m.get("telegram_user_id")) != str(uid)]
+        removed = before - len(data["staff"])
+    if not removed:
+        return jsonify({"error": "Membre introuvable"}), 404
     return jsonify({"ok": True})
+
+
+@app.route("/api/support/file", methods=["POST"])
+@limiter.limit("20 per minute")
+def relay_support_file():
+    """Fichier envoyé par un client au bot client → transmis à l'équipe via le bot admin."""
+    auth_err = _require_bot_key()
+    if auth_err:
+        return auth_err
+    f = request.files.get("file")
+    uid = _clip(request.form.get("telegram_user_id"), 20)
+    if not f or not uid:
+        return jsonify({"error": "Fichier et client requis"}), 400
+    blob = f.read()
+    if not blob or len(blob) > 20 * 1024 * 1024:
+        return jsonify({"error": "Fichier vide ou trop lourd (max 20 Mo)"}), 400
+    name = html.escape(_clip(request.form.get("client_name"), 80) or f"User{uid}")
+    caption = f"📎 Fichier de <b>{name}</b> (Bot Telegram) #U{uid}\n<i>↩️ Réponds à ce message pour répondre au client.</i>"
+    sent = _send_telegram_document(blob, _clip(f.filename, 100) or "fichier", caption=caption,
+                                   content_type=f.mimetype or "application/octet-stream", parse_mode="HTML")
+    return jsonify({"ok": bool(sent), "sent": sent})
 
 
 if __name__ == "__main__":

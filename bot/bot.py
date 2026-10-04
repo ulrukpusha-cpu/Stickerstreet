@@ -34,6 +34,8 @@ WEBAPP_URL = os.getenv("STICKERSTREET_WEBAPP", "https://stickerstreet.vercel.app
 _admin_ids = os.getenv("ADMIN_TELEGRAM_ID", "")
 ADMIN_TELEGRAM_IDS = [str(x).strip() for x in _admin_ids.split(",") if x.strip()]
 ADMIN_API_KEY = os.getenv("ADMIN_API_KEY", "").strip()
+# Si le bot équipe « StickerStreet Admin » est configuré, ce bot-ci ne sert plus qu'aux clients
+ADMIN_BOT_ENABLED = bool(os.getenv("ADMIN_BOT_TOKEN", "").strip().strip('"').strip("'"))
 _admin_user_ids = [int(x) for x in ADMIN_TELEGRAM_IDS if x.isdigit()]
 
 logging.basicConfig(
@@ -455,25 +457,33 @@ async def client_support_message(update: Update, context: ContextTypes.DEFAULT_T
 
 
 async def client_support_file(update: Update, context: ContextTypes.DEFAULT_TYPE):
-    """Photo / fichier d'un client (ex. son design) → transféré aux admins avec le tag #U pour répondre."""
+    """Photo / fichier d'un client (ex. son design) → relayé à toute l'équipe par l'API (bot admin)."""
     user = update.effective_user
-    if str(user.id) in ADMIN_TELEGRAM_IDS:
+    if not ADMIN_BOT_ENABLED and str(user.id) in ADMIN_TELEGRAM_IDS:
         return
-    sent = 0
-    for admin_id in _admin_user_ids:
-        try:
-            await context.bot.forward_message(admin_id, update.effective_chat.id, update.message.message_id)
-            await context.bot.send_message(
-                admin_id,
-                f"📎 Fichier de <b>{html.escape(user.full_name or 'client')}</b> (Bot Telegram) #U{user.id}\n"
-                "<i>↩️ Réponds à ce message pour répondre au client.</i>",
-                parse_mode="HTML",
-            )
-            sent += 1
-        except Exception as e:
-            logger.warning(f"Transfert fichier vers admin {admin_id} impossible: {e}")
-    await update.message.reply_text(
-        "✅ Fichier transmis à l'équipe, on revient vers toi ici." if sent else "❌ Transfert impossible pour le moment, réessaie plus tard.",
+    msg = update.message
+    media = msg.document or (msg.photo[-1] if msg.photo else None)
+    filename = getattr(msg.document, "file_name", None) or f"photo_{msg.message_id}.jpg"
+    mime = getattr(msg.document, "mime_type", None) or "image/jpeg"
+    ok = False
+    try:
+        if getattr(media, "file_size", 0) and media.file_size > 20 * 1024 * 1024:
+            raise ValueError("trop lourd")
+        tg_file = await context.bot.get_file(media.file_id)
+        blob = bytes(await tg_file.download_as_bytearray())
+        r = requests.post(
+            f"{API_URL}/api/support/file",
+            headers={"X-Admin-Key": ADMIN_API_KEY},
+            data={"telegram_user_id": user.id, "client_name": user.full_name},
+            files={"file": (filename, blob, mime)},
+            timeout=60,
+        )
+        ok = r.ok and r.json().get("ok")
+    except Exception as e:
+        logger.warning(f"Relais fichier client impossible: {e}")
+    await msg.reply_text(
+        "✅ Fichier transmis à l'équipe, on revient vers toi ici." if ok
+        else "❌ Transfert impossible (max 20 Mo). Réessaie ou envoie-le par l'app.",
         reply_markup=MENU_KB,
     )
 
@@ -508,6 +518,9 @@ async def open_app(update: Update, context: ContextTypes.DEFAULT_TYPE):
 async def admin_summary(update: Update, context: ContextTypes.DEFAULT_TYPE):
     """/admin : résumé des commandes (réservé aux ADMIN_TELEGRAM_ID)."""
     if str(update.effective_user.id) not in ADMIN_TELEGRAM_IDS:
+        return
+    if ADMIN_BOT_ENABLED:
+        await update.message.reply_text("🛠 La gestion se fait maintenant dans le bot « StickerStreet Admin ».")
         return
     orders = api_get("/api/orders") or []
     today = __import__("datetime").date.today().isoformat()
@@ -634,7 +647,7 @@ async def post_init(app):
     """Configure le menu des commandes (clients + admin) et le bouton Menu qui ouvre la webapp."""
     try:
         await app.bot.set_my_commands(CLIENT_COMMANDS, scope=BotCommandScopeDefault())
-        for admin_id in _admin_user_ids:
+        for admin_id in ([] if ADMIN_BOT_ENABLED else _admin_user_ids):
             await app.bot.set_my_commands(
                 [BotCommand("admin", "🛠 Résumé des commandes (admin)"), *CLIENT_COMMANDS],
                 scope=BotCommandScopeChat(chat_id=admin_id),
@@ -713,7 +726,7 @@ def main():
     app.add_handler(CommandHandler("app", open_app))
     app.add_handler(CommandHandler(["aide", "help"], start))
     app.add_handler(CommandHandler("admin", admin_summary))
-    if _admin_user_ids:
+    if _admin_user_ids and not ADMIN_BOT_ENABLED:  # repli tant que le bot admin n'existe pas
         app.add_handler(MessageHandler(
             filters.TEXT & ~filters.COMMAND & filters.User(user_id=_admin_user_ids),
             admin_chat_reply,

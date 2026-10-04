@@ -34,6 +34,16 @@ module.exports = {
     },
     {
       ...stableOpts,
+      // Bot équipe « StickerStreet Admin » : sort avec le code 78 si ADMIN_BOT_TOKEN manque (pas de boucle de redémarrage)
+      name: 'stickerstreet-admin-bot',
+      cwd: '/var/www/stickerstreet/bot',
+      script: 'venv/bin/python',
+      args: 'admin_bot.py',
+      interpreter: 'none',
+      stop_exit_codes: [78],
+    },
+    {
+      ...stableOpts,
       name: 'stickerstreet-webapp',
       cwd: '/var/www/stickerstreet/webapp',
       script: 'npx',

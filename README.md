@@ -77,6 +77,17 @@ STICKERSTREET_API=http://localhost:5000
 
 ---
 
+## Bot équipe « StickerStreet Admin »
+
+`bot/admin_bot.py` (PM2 `stickerstreet-admin-bot`) — réservé à l'équipe, séparé du bot client @StickerStreetbot.
+
+- Reçoit les notifications (commandes avec boutons de statut, paiements, messages 📩 et fichiers 📎 des clients)
+- Support : répondre à une notification 📩/📎 → la réponse part au client via @StickerStreetbot
+- Rôles : propriétaire (`ADMIN_TELEGRAM_ID`), **admin** (tout + équipe + panel web), **employé** (commandes + support)
+- Ajout d'un membre : « 👥 Équipe » → « Inviter » → lien à usage unique valable 24 h
+- Activation : `python3 scripts/set-admin-bot-token.py` (token BotFather saisi sans affichage)
+- Sans ce bot, le bot client sert de repli (notifications au propriétaire uniquement)
+
 ## Configuration
 
 ### API
