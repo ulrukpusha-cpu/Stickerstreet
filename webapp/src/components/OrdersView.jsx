@@ -1,46 +1,64 @@
-import { S, XOF_FMT, STATUSES } from "../data/constants";
+import Icon from "./Icon";
+import { XOF_FMT, STATUSES } from "../data/constants";
 
-export default function OrdersView({ orders, title, card, t }) {
-  if (!orders.length)
+const STEP_LABELS = ["Reçue", "Confirmée", "Impression", "Expédiée", "Livrée"];
+const PAY_LABELS = { momo: "Mobile Money", wave: "Wave", djamo: "Djamo", ton: "TON", stars: "Stars" };
+
+function formatDate(o) {
+  const d = new Date(o.created_at || o.date);
+  if (Number.isNaN(d.getTime())) return o.date || "";
+  return d.toLocaleDateString("fr-FR", { day: "numeric", month: "short", year: "numeric" });
+}
+
+export default function OrdersView({ orders, go }) {
+  if (!orders.length) {
     return (
-      <div style={{ display: "flex", flexDirection: "column", alignItems: "center", padding: "80px 20px", gap: 14 }}>
-        <span style={{ fontSize: 72, color: "#D1D5DB" }}>{S.orders}</span>
-        <h3 style={{ fontWeight: 700, fontSize: 20, margin: 0 }}>Aucune commande</h3>
-        <p style={{ color: t.textMuted, fontFamily: "'Inter',sans-serif" }}>Tes commandes apparaîtront ici</p>
+      <div className="empty">
+        <div className="empty-icon"><Icon name="package" size={32} /></div>
+        <h3>Aucune commande</h3>
+        <p>Tes commandes et leur suivi apparaîtront ici.</p>
+        <button className="btn btn-ink" onClick={() => go("home")}>Commencer mes achats</button>
       </div>
     );
+  }
 
-  const stKeys = Object.keys(STATUSES);
+  const keys = Object.keys(STATUSES);
   return (
-    <div style={{ animation: "fadeUp 0.3s ease" }}>
-      <h2 style={title}>Mes commandes</h2>
-      <div style={{ display: "flex", flexDirection: "column", gap: 14 }}>
+    <div>
+      <h1 className="page-title">Mes commandes <small>{orders.length}</small></h1>
+      <div className="stack">
         {orders.map((o, i) => {
-          const st = STATUSES[o.status];
-          const cur = stKeys.indexOf(o.status);
+          const st = STATUSES[o.status] || STATUSES.pending;
+          const cur = Math.max(0, keys.indexOf(o.status));
           return (
-            <div key={o.id} style={{ ...card, borderRadius: 20, padding: 18, animation: `fadeUp 0.4s ease ${i * 0.08}s both` }}>
-              <div style={{ display: "flex", justifyContent: "space-between", alignItems: "flex-start", marginBottom: 14 }}>
+            <article key={o.id} className="card order" style={{ animationDelay: `${Math.min(i, 6) * 50}ms` }}>
+              <div className="order-head">
                 <div>
-                  <div style={{ fontWeight: 800, fontSize: 16 }}>{o.id}</div>
-                  <div style={{ fontFamily: "'Inter',sans-serif", color: t.textMuted, fontSize: 13, marginTop: 2 }}>{o.date}</div>
+                  <div className="order-id">{o.id}</div>
+                  <div className="order-date">{formatDate(o)}{o.payment_method ? ` · ${PAY_LABELS[o.payment_method] || o.payment_method}` : ""}</div>
                 </div>
-                <div style={{ background: st.color + "18", color: st.color, padding: "6px 14px", borderRadius: 10, fontSize: 12, fontWeight: 700 }}>{st.icon} {st.label}</div>
+                <span className="status" style={{ background: `${st.color}1F`, color: st.color }}><i />{st.label}</span>
               </div>
-              <div style={{ display: "flex", flexDirection: "column", gap: 6, marginBottom: 14 }}>
+              <div className="order-items">
                 {o.items.map((it, j) => (
-                  <div key={j} style={{ display: "flex", alignItems: "center", gap: 10, fontSize: 14, fontFamily: "'Inter',sans-serif" }}>
-                    {it.img ? <img src={it.img} alt={it.name} style={{ width: 20, height: 20, borderRadius: 5, objectFit: "cover" }} /> : <span>{it.emoji}</span>}
-                    <span style={{ fontWeight: 500 }}>{it.name} × {it.qty}</span>
-                    <span style={{ color: t.textMuted, fontSize: 12 }}>{it.sz || it.selectedSize}</span>
+                  <div key={j} className="order-item">
+                    {it.img ? <img src={it.img} alt="" /> : <span className="oi-emoji">{it.emoji}</span>}
+                    <span>{it.name} <small>· {it.sz || "—"}</small></span>
+                    <small className="num">×{it.qty}</small>
                   </div>
                 ))}
               </div>
-              <div style={{ display: "flex", justifyContent: "space-between", alignItems: "center" }}>
-                <div style={{ display: "flex", gap: 3, flex: 1 }}>{stKeys.map((k, idx) => <div key={k} style={{ flex: 1, height: 4, borderRadius: 2, background: idx <= cur ? st.color : t.cardBorder, transition: "all 0.3s" }} />)}</div>
-                <span style={{ fontWeight: 800, fontSize: 17, marginLeft: 16 }}>{XOF_FMT(o.totalXof || o.total * 600)}</span>
+              <div className="steps" aria-label={`Étape ${cur + 1} sur ${keys.length} : ${st.label}`}>
+                {keys.map((k, idx) => <div key={k} style={idx <= cur ? { background: st.color } : undefined} />)}
               </div>
-            </div>
+              <div className="steps-labels" aria-hidden="true">
+                {STEP_LABELS.map((l, idx) => <span key={l} style={idx === cur ? { color: st.color } : undefined}>{l}</span>)}
+              </div>
+              <div className="order-foot">
+                <span className="muted" style={{ fontSize: 13 }}>{o.items.reduce((s, it) => s + it.qty, 0)} article(s)</span>
+                <b className="num">{XOF_FMT(o.totalXof || 0)}</b>
+              </div>
+            </article>
           );
         })}
       </div>

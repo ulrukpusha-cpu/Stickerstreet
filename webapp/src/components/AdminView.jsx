@@ -1,7 +1,8 @@
 import { useEffect, useMemo, useState } from "react";
 import { XOF_FMT, STATUSES } from "../data/constants";
 
-const CATS = ["stickers", "flyers", "cartes", "photo"];
+const CATS = ["stickers", "flyers", "cartes", "posters", "tshirts", "art", "photo"];
+const PAY_LABELS = { momo: "Mobile Money", wave: "Wave", djamo: "Djamo", ton: "TON", stars: "Stars" };
 const EMPTY_FORM = {
   name: "",
   cat: "stickers",
@@ -103,10 +104,10 @@ export default function AdminView({
   onUpdateBanner,
   onDeleteBanner,
   onUploadImage,
-  onChangeAdminPin,
+  onLogout,
+  adminVia = "key",
   notify,
 }) {
-  const [newPin, setNewPin] = useState("");
   const [catFilter, setCatFilter] = useState("all");
   const [editingId, setEditingId] = useState(null);
   const [form, setForm] = useState(EMPTY_FORM);
@@ -453,12 +454,20 @@ export default function AdminView({
             <div key={o.id} style={{ ...card, borderRadius: 18, padding: 16 }}>
               <div style={{ marginBottom: 12 }}>
                 <div style={{ fontWeight: 700, fontSize: 15 }}>{o.id}</div>
-                <div style={{ fontFamily: "'Inter',sans-serif", color: t.textMuted, fontSize: 12, marginTop: 2 }}>{o.date} · {o.items.length} article(s) · {XOF_FMT(o.totalXof || o.total * 600)}</div>
+                <div style={{ fontFamily: "'Inter',sans-serif", color: t.textMuted, fontSize: 12, marginTop: 2 }}>{o.date} · {o.items.length} article(s) · {XOF_FMT(o.totalXof || o.total * 600)} · {PAY_LABELS[o.payment_method] || o.payment_method || "—"}</div>
+                <div style={{ fontFamily: "'Inter',sans-serif", color: t.textSec, fontSize: 13, marginTop: 8, lineHeight: 1.5 }}>
+                  <div><strong style={{ color: t.text }}>{o.client_name || "Client"}</strong>{o.telegram_user_id ? ` · TG ${o.telegram_user_id}` : ""}</div>
+                  {(o.client_phone || o.client_address) && <div>{[o.client_phone, o.client_address].filter(Boolean).join(" · ")}</div>}
+                  <div style={{ color: t.textMuted, fontSize: 12 }}>{o.items.map((it) => `${it.name} (${it.sz || "—"}) ×${it.qty}`).join(", ")}</div>
+                </div>
+                {o.payment_note && (
+                  <div style={{ marginTop: 8, padding: "8px 10px", borderRadius: 10, background: t.warn, border: `1px solid ${t.warnBorder}`, color: "#D97E06", fontSize: 12, fontWeight: 600 }}>⚠ {o.payment_note}</div>
+                )}
               </div>
               <label style={{ fontSize: 11, color: t.textMuted, fontWeight: 600, letterSpacing: 1, textTransform: "uppercase" }}>Statut :</label>
               <div style={{ display: "flex", gap: 6, marginTop: 8, flexWrap: "wrap" }}>
                 {Object.entries(STATUSES).map(([k, v]) => (
-                  <button key={k} onClick={() => handleStatusChange(o.id, k)} style={{ padding: "7px 12px", borderRadius: 10, fontSize: 13, cursor: "pointer", fontFamily: "'Poppins',sans-serif", fontWeight: 600, border: "none", background: o.status === k ? v.color + "22" : t.bgAlt, color: o.status === k ? v.color : t.textMuted, transition: "all 0.2s" }}>{v.icon} {v.label}</button>
+                  <button key={k} onClick={() => handleStatusChange(o.id, k)} style={{ padding: "7px 12px", borderRadius: 10, fontSize: 13, cursor: "pointer", fontFamily: "'Inter',sans-serif", fontWeight: 600, border: "none", background: o.status === k ? v.color + "22" : t.bgAlt, color: o.status === k ? v.color : t.textMuted, transition: "all 0.2s" }}>{v.icon} {v.label}</button>
                 ))}
               </div>
             </div>
@@ -468,27 +477,15 @@ export default function AdminView({
 
       {tab === "settings" && (
         <div style={{ ...card, borderRadius: 18, padding: 20 }}>
-          <h3 style={{ margin: "0 0 16px", fontSize: 16, fontWeight: 700 }}>Code PIN admin</h3>
-          <p style={{ fontFamily: "'Inter',sans-serif", fontSize: 13, color: t.textMuted, marginBottom: 14 }}>Modifie le code à 4 chiffres pour accéder au panel admin.</p>
-          <input
-            type="password"
-            inputMode="numeric"
-            maxLength={4}
-            value={newPin}
-            onChange={(e) => setNewPin(e.target.value.replace(/\D/g, ""))}
-            placeholder="Nouveau PIN (4 chiffres)"
-            style={{ width: "100%", padding: "14px 16px", background: t.inputBg || t.bgAlt, border: `1px solid ${t.cardBorder}`, borderRadius: 12, fontFamily: "'Inter',sans-serif", fontSize: 18, color: t.text, outline: "none", letterSpacing: 8, textAlign: "center", boxSizing: "border-box", marginBottom: 12 }}
-          />
-          <button
-            onClick={() => {
-              if (newPin.length !== 4) { notify?.("Le PIN doit faire 4 chiffres"); return; }
-              try { onChangeAdminPin?.(newPin); } catch (err) { notify?.(err?.message || "Erreur changement PIN"); return; }
-              setNewPin("");
-              notify?.("PIN modifié ✓ (reconnexion admin requise)");
-            }}
-            style={{ padding: "12px 20px", background: "#F59E0B", color: "#fff", border: "none", borderRadius: 12, fontWeight: 700, fontSize: 14, cursor: "pointer", fontFamily: "'Poppins',sans-serif" }}
-          >
-            Enregistrer le PIN
+          <h3 style={{ margin: "0 0 8px", fontSize: 16, fontWeight: 700 }}>Accès admin</h3>
+          <p style={{ fontFamily: "'Inter',sans-serif", fontSize: 13, color: t.textSec, margin: "0 0 16px", lineHeight: 1.55 }}>
+            {adminVia === "telegram"
+              ? "Connecté en tant qu'admin via ton compte Telegram (ADMIN_TELEGRAM_ID)."
+              : "Connecté avec la clé admin. Elle est gardée uniquement pour cet onglet et vérifiée par le serveur."}
+            <br />Pour changer la clé : modifie ADMIN_API_KEY dans api/.env et bot/.env, puis redémarre l'API et le bot.
+          </p>
+          <button onClick={() => onLogout?.()} style={{ width: "100%", padding: 14, borderRadius: 14, border: "none", background: t.bgAlt, color: t.text, fontWeight: 700, fontSize: 14, cursor: "pointer", fontFamily: "'Inter',sans-serif" }}>
+            Quitter le mode admin
           </button>
         </div>
       )}

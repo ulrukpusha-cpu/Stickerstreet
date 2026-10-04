@@ -5,11 +5,12 @@ Commande : python bot.py
 import json
 import logging
 import os
+import re
 import requests
 from dotenv import load_dotenv
 
-load_dotenv()
-from telegram import Update, InlineKeyboardButton, InlineKeyboardMarkup, WebAppInfo, MenuButtonWebApp
+load_dotenv(override=True)  # priorité au .env (PM2 peut garder des valeurs CRLF dans dump.pm2)
+from telegram import Update, InlineKeyboardButton, InlineKeyboardMarkup, WebAppInfo, MenuButtonWebApp, ReplyKeyboardMarkup
 from telegram.ext import (
     Application,
     CommandHandler,
@@ -36,6 +37,9 @@ logging.basicConfig(
     level=logging.INFO,
 )
 logger = logging.getLogger(__name__)
+# httpx logge chaque URL en INFO, token du bot compris : on le fait taire.
+logging.getLogger("httpx").setLevel(logging.WARNING)
+logging.getLogger("httpcore").setLevel(logging.WARNING)
 
 
 # ==================== API ====================
@@ -126,6 +130,7 @@ async def start(update: Update, context: ContextTypes.DEFAULT_TYPE):
         parse_mode="Markdown",
         reply_markup=InlineKeyboardMarkup(keyboard),
     )
+    await update.message.reply_text("⌨️ Menu rapide 👇", reply_markup=MENU_KB)
 
 
 async def catalog(update: Update, context: ContextTypes.DEFAULT_TYPE):
@@ -141,7 +146,10 @@ async def catalog(update: Update, context: ContextTypes.DEFAULT_TYPE):
             cats[c] = []
         cats[c].append(p)
 
-    cat_names = {"stickers": "🏷️ Stickers", "flyers": "📄 Flyers", "cartes": "🪪 Cartes"}
+    cat_names = {
+        "stickers": "🏷️ Stickers", "flyers": "📄 Flyers", "cartes": "🪪 Cartes",
+        "posters": "🖼️ Posters", "tshirts": "👕 T-shirts & textile", "art": "🎨 Art", "photo": "📷 Photo",
+    }
 
     for cat, prods in cats.items():
         text = f"*{cat_names.get(cat, cat)}*\n\n"
@@ -273,6 +281,8 @@ async def order_confirm_callback(update: Update, context: ContextTypes.DEFAULT_T
     order = api_post("/api/orders", {
         "items": items,
         "telegram_user_id": update.effective_user.id,
+        "client_name": update.effective_user.full_name,
+        "payment_method": "momo",
     })
     if order:
         context.user_data["cart"] = []
@@ -398,8 +408,16 @@ async def support(update: Update, context: ContextTypes.DEFAULT_TYPE):
 
 
 async def pre_checkout(update: Update, context: ContextTypes.DEFAULT_TYPE):
-    """Approuve la pré-vérification avant paiement Telegram Stars."""
-    await update.pre_checkout_query.answer(ok=True)
+    """Avant paiement Stars : la facture doit exister côté API et le montant correspondre."""
+    q = update.pre_checkout_query
+    pending = api_get(f"/api/invoice/stars/{q.invoice_payload}") if q.invoice_payload else None
+    if not pending:
+        await q.answer(ok=False, error_message="Facture expirée. Relance le paiement depuis l'app.")
+        return
+    if q.currency != "XTR" or int(q.total_amount) != int(pending.get("stars") or 0):
+        await q.answer(ok=False, error_message="Montant incohérent. Relance le paiement depuis l'app.")
+        return
+    await q.answer(ok=True)
 
 
 async def successful_payment(update: Update, context: ContextTypes.DEFAULT_TYPE):
@@ -411,8 +429,9 @@ async def successful_payment(update: Update, context: ContextTypes.DEFAULT_TYPE)
         return
     order = api_post("/api/orders/from-invoice", {
         "invoice_id": payload,
-        "invoice_payload": payload,
         "telegram_user_id": update.effective_user.id,
+        "paid_stars": payment.total_amount,
+        "telegram_payment_charge_id": payment.telegram_payment_charge_id,
     })
     if order:
         momo = api_get("/api/momo") or []
@@ -428,19 +447,32 @@ async def successful_payment(update: Update, context: ContextTypes.DEFAULT_TYPE)
         await update.message.reply_text("❌ Erreur lors de la création de la commande. Réessaie ou contacte le support.")
 
 
+_CLIENT_TAG = re.compile(r"#U(\d+)")
+
+
 async def admin_chat_reply(update: Update, context: ContextTypes.DEFAULT_TYPE):
-    """Quand l'admin envoie un message (non-commande), l'ajoute au chat support webapp."""
-    if not ADMIN_TELEGRAM_IDS or str(update.effective_user.id) not in ADMIN_TELEGRAM_IDS:
-        await update.message.reply_text("Utilisez les commandes du menu pour naviguer. /support pour le support.")
-        return
+    """L'admin répond (swipe → Répondre) à une notification de chat : la réponse va au bon client."""
     text = (update.message.text or "").strip()
     if not text:
         return
-    ok = api_post("/api/chat/reply", {"text": text})
-    if ok is not None:
-        await update.message.reply_text("✅ Réponse envoyée au chat webapp.")
-    else:
+    replied = update.message.reply_to_message
+    match = _CLIENT_TAG.search((replied.text or replied.caption or "") if replied else "")
+    if not match:
+        await update.message.reply_text(
+            "↩️ Pour répondre à un client, *réponds* (glisse vers la gauche) à sa notification 📩.",
+            parse_mode="Markdown",
+        )
+        return
+    client_id = int(match.group(1))
+    ok = api_post("/api/chat/reply", {"telegram_user_id": client_id, "text": text})
+    if ok is None:
         await update.message.reply_text("❌ Erreur envoi. Vérifie que l'API est accessible.")
+        return
+    try:
+        await context.bot.send_message(client_id, f"💬 Support StickerStreet :\n\n{text}")
+        await update.message.reply_text("✅ Réponse envoyée (chat de l'app + Telegram du client).")
+    except Exception:
+        await update.message.reply_text("✅ Réponse visible dans le chat de l'app (le client n'a pas démarré le bot).")
 
 
 async def _fallback_text(update: Update, context: ContextTypes.DEFAULT_TYPE):
@@ -478,6 +510,24 @@ async def post_init(app):
         logger.warning(f"Menu button non configuré: {e}")
 
 
+MENU_KB = ReplyKeyboardMarkup(
+    [["🛍️ Catalogue", "🛒 Commander"], ["📦 Mes commandes", "🆘 Support"]],
+    resize_keyboard=True,
+)
+
+
+async def menu_button_handler(update: Update, context: ContextTypes.DEFAULT_TYPE):
+    t = (update.message.text or "").strip()
+    if t == "🛍️ Catalogue":
+        return await catalog(update, context)
+    if t == "🛒 Commander":
+        return await order_start(update, context)
+    if t == "📦 Mes commandes":
+        return await my_orders(update, context)
+    if t == "🆘 Support":
+        return await support(update, context)
+
+
 def main():
     if not BOT_TOKEN:
         print("❌ Configure TELEGRAM_BOT_TOKEN (variable d'environnement ou .env)")
@@ -494,6 +544,7 @@ def main():
         },
         fallbacks=[CommandHandler("cancel", register_cancel)],
     )
+    app.add_handler(MessageHandler(filters.Text(["🛍️ Catalogue", "🛒 Commander", "📦 Mes commandes", "🆘 Support"]), menu_button_handler))
     app.add_handler(PreCheckoutQueryHandler(pre_checkout))
     app.add_handler(MessageHandler(filters.SUCCESSFUL_PAYMENT, successful_payment))
     app.add_handler(conv_register)
@@ -511,7 +562,8 @@ def main():
     app.add_handler(CallbackQueryHandler(callback_handler))
 
     print("🤖 Bot StickerStreet en cours d'exécution...")
-    app.run_polling(allowed_updates=Update.ALL_TYPES)
+    # Vide la file Telegram au démarrage (utile après conflit webhook / autre instance)
+    app.run_polling(allowed_updates=Update.ALL_TYPES, drop_pending_updates=True)
 
 
 if __name__ == "__main__":

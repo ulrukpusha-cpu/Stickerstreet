@@ -1,260 +1,234 @@
 import { useState, useEffect } from "react";
 import { useTonConnectUI, useTonAddress, TonConnectButton } from "@tonconnect/ui-react";
-import { S, XOF_FMT, MOMO } from "../data/constants";
+import Icon from "./Icon";
+import { XOF_FMT, MOMO } from "../data/constants";
 import { fetchMomo, createInvoiceStars, fetchTonRate } from "../api";
 
 const TON_MERCHANT = import.meta.env.VITE_TON_MERCHANT_ADDRESS || "";
+const BOT_USERNAME = import.meta.env.VITE_TELEGRAM_BOT_USERNAME || "StickerStreetBot";
+const WAVE_QR_URL = "/wave-qr.png";
 
-export default function CartView({ cart, totalXof, pay, setPay, rm, updQty, checkout, checkoutLoading = false, title, segBtn, sqBtn, card, t, profile }) {
-  const [momoOp, setMomoOp] = useState(null);
-  const [copied, setCopied] = useState("");
-  const [momoList, setMomoList] = useState(MOMO);
+function normalizeMomoOps(list) {
+  const safe = Array.isArray(list) ? list : [];
+  return safe
+    .filter((op) => op?.id === "wave" || op?.id === "djamo")
+    .map((op) => (op.id === "wave"
+      ? { ...op, name: op.name || "Wave", hint: "Scanne le QR Wave" }
+      : { ...op, name: op.name || "Djamo", link: op.link || "https://pay.djamo.com/pkbyg", hint: "Paie via le lien Djamo" }));
+}
+
+const METHODS = [
+  { id: "momo", label: "MoMo", icon: "phone" },
+  { id: "stars", label: "Stars", icon: "star" },
+  { id: "ton", label: "TON", icon: "ton" },
+];
+
+export default function CartView({ cart, totalXof, pay, setPay, rm, updQty, checkout, checkoutLoading = false, profile, hasSession, onStarsPaid, go, notify }) {
+  const [momoOp, setMomoOp] = useState("wave");
+  const [momoList, setMomoList] = useState(() => normalizeMomoOps(MOMO));
   const [starsLoading, setStarsLoading] = useState(false);
   const [tonRate, setTonRate] = useState(null);
-  const [tonRateLoading, setTonRateLoading] = useState(false);
   const [tonRateError, setTonRateError] = useState("");
-  const tgWebApp = typeof window !== "undefined" ? window.Telegram?.WebApp : null;
+  const [tonLoading, setTonLoading] = useState(false);
+  const [tonConnectUI] = useTonConnectUI();
+  const tonAddress = useTonAddress();
+  const tg = typeof window !== "undefined" && window.Telegram?.WebApp?.initData ? window.Telegram.WebApp : null;
+  const starsAvailable = !!tg?.openInvoice && hasSession;
+
   useEffect(() => {
-    fetchMomo().then(setMomoList).catch(() => setMomoList(MOMO));
+    fetchMomo().then((ops) => setMomoList(normalizeMomoOps(ops))).catch(() => {});
   }, []);
+
   useEffect(() => {
     if (pay !== "ton" || !totalXof) {
       setTonRate(null);
       setTonRateError("");
       return;
     }
-    setTonRateLoading(true);
-    setTonRateError("");
     fetchTonRate(totalXof)
-      .then(setTonRate)
-      .catch((e) => setTonRateError(e.message || "Cours indisponible"))
-      .finally(() => setTonRateLoading(false));
+      .then((r) => { setTonRate(r); setTonRateError(""); })
+      .catch((e) => setTonRateError(e.message || "Cours indisponible"));
   }, [pay, totalXof]);
-  const [tonConnectUI] = useTonConnectUI();
-  const tonAddress = useTonAddress();
-  const [tonLoading, setTonLoading] = useState(false);
 
-  const copyNum = (num, id) => {
-    navigator.clipboard?.writeText(num).catch(() => {});
-    setCopied(id);
-    setTimeout(() => setCopied(""), 2000);
-  };
-
-  if (!cart.length)
+  if (!cart.length) {
     return (
-      <div style={{ display: "flex", flexDirection: "column", alignItems: "center", padding: "80px 20px", gap: 14, animation: "fadeUp 0.3s ease" }}>
-        <span style={{ fontSize: 72, color: "#D1D5DB" }}>{S.cart}</span>
-        <h3 style={{ fontWeight: 700, fontSize: 20, margin: 0 }}>Panier vide</h3>
-        <p style={{ color: t.textMuted, fontFamily: "'Inter',sans-serif", fontSize: 15 }}>Ajoute des articles pour commencer !</p>
+      <div className="empty">
+        <div className="empty-icon"><Icon name="bag" size={32} /></div>
+        <h3>Ton panier est vide</h3>
+        <p>Choisis un sticker, un flyer ou des cartes de visite pour commencer.</p>
+        <button className="btn btn-ink" onClick={() => go("home")}>Voir le catalogue</button>
       </div>
     );
+  }
+
+  const count = cart.reduce((s, i) => s + i.qty, 0);
+  const missingContact = !profile?.name || !profile?.phone;
+
+  const payStars = async () => {
+    setStarsLoading(true);
+    try {
+      const { url } = await createInvoiceStars(cart, profile);
+      const onClosed = (e) => {
+        tg.offEvent?.("invoiceClosed", onClosed);
+        setStarsLoading(false);
+        if (e?.status === "paid") onStarsPaid();
+        else if (e?.status === "failed") notify("Paiement Stars échoué");
+      };
+      tg.onEvent("invoiceClosed", onClosed);
+      tg.openInvoice(url);
+    } catch (err) {
+      setStarsLoading(false);
+      notify(err.message || "Erreur facture Stars");
+    }
+  };
+
+  const payTon = async () => {
+    if (!tonRate?.amount_ton || !TON_MERCHANT) return;
+    setTonLoading(true);
+    try {
+      const amountNano = BigInt(Math.round(tonRate.amount_ton * 1e9));
+      const result = await tonConnectUI.sendTransaction({
+        validUntil: Math.floor(Date.now() / 1000) + 300,
+        messages: [{ address: TON_MERCHANT, amount: amountNano.toString() }],
+      });
+      await checkout({ payment_method: "ton", ton_tx_boc: result?.boc });
+    } catch (err) {
+      if (!String(err).toLowerCase().includes("declined")) notify("Transaction TON non envoyée");
+    } finally {
+      setTonLoading(false);
+    }
+  };
+
+  let cta;
+  if (pay === "stars") {
+    cta = starsAvailable
+      ? <button className="btn btn-primary btn-block" onClick={payStars} disabled={starsLoading}><Icon name="star" size={18} fill strokeWidth={0} />{starsLoading ? "Ouverture du paiement…" : `Payer ${XOF_FMT(totalXof)} en Stars`}</button>
+      : <a className="btn btn-telegram btn-block" href={`https://t.me/${BOT_USERNAME}`} target="_blank" rel="noopener noreferrer"><Icon name="telegram" size={18} />Ouvrir dans Telegram</a>;
+  } else if (pay === "ton") {
+    cta = !tonAddress
+      ? <div style={{ display: "flex", justifyContent: "center" }}><TonConnectButton /></div>
+      : <button className="btn btn-ton btn-block" onClick={payTon} disabled={tonLoading || !tonRate?.amount_ton || !TON_MERCHANT}>
+          <Icon name="ton" size={18} />{tonLoading ? "Envoi en cours…" : tonRate ? `Payer ≈ ${tonRate.amount_ton.toFixed(3)} TON` : "Calcul du cours…"}
+        </button>;
+  } else {
+    cta = (
+      <button className="btn btn-primary btn-block" onClick={() => checkout({ payment_method: momoOp || "momo" })} disabled={checkoutLoading}>
+        {checkoutLoading ? "Enregistrement…" : "J'ai payé — valider ma commande"}
+      </button>
+    );
+  }
 
   return (
-    <div style={{ animation: "fadeUp 0.3s ease" }}>
-      <h2 style={title}>Ton panier <span style={{ color: "#FF3B5C" }}>({cart.length})</span></h2>
+    <div>
+      <h1 className="page-title">Panier <small>{count} article{count > 1 ? "s" : ""}</small></h1>
 
-      <div style={{ display: "flex", gap: 6, marginBottom: 18, background: t.segBg, borderRadius: 16, padding: 4 }}>
-        <button onClick={() => setPay("stars")} style={{ ...segBtn(pay === "stars"), fontSize: 12, padding: "10px 6px", display: "flex", alignItems: "center", justifyContent: "center", gap: 4 }}>{S.star} Stars</button>
-        <button onClick={() => setPay("ton")} style={{ ...segBtn(pay === "ton"), fontSize: 12, padding: "10px 6px", display: "flex", alignItems: "center", justifyContent: "center", gap: 4 }}>{S.diamond} TON</button>
-        <button onClick={() => setPay("momo")} style={{ ...segBtn(pay === "momo"), fontSize: 12, padding: "10px 6px", display: "flex", alignItems: "center", justifyContent: "center", gap: 4 }}>{S.phone} MoMo</button>
-      </div>
-
-      {pay === "stars" && (
-        <div style={{ marginBottom: 18, animation: "fadeUp 0.3s ease" }}>
-          <div style={{ ...card, borderRadius: 20, padding: "20px 18px", border: "2px solid #FFD70033" }}>
-            <div style={{ display: "flex", alignItems: "center", gap: 10, marginBottom: 12 }}>
-              <div style={{ width: 44, height: 44, borderRadius: 14, background: "#FFD70015", display: "flex", alignItems: "center", justifyContent: "center", fontSize: 24 }}>★</div>
-              <div>
-                <div style={{ fontWeight: 800, fontSize: 16 }}>Paiement en Stars</div>
-                <div style={{ fontFamily: "'Inter',sans-serif", fontSize: 12, color: t.textSec }}>Ta facture en FCFA convertie en Stars à l'instant T</div>
-              </div>
-            </div>
-            {!tgWebApp ? (
-              <div style={{ marginTop: 12, padding: "14px 16px", background: t.warn, borderRadius: 12, border: `1px solid ${t.warnBorder}` }}>
-                <div style={{ fontWeight: 700, fontSize: 13, color: "#E17055", marginBottom: 8 }}>Paiement Stars uniquement dans l'app Telegram</div>
-                <div style={{ fontFamily: "'Inter',sans-serif", fontSize: 13, color: t.textSec, marginBottom: 12 }}>Ouvre le bot Telegram, lance l'app StickerStreet, puis reviens au panier pour payer en Stars.</div>
-                <a href={`https://t.me/${import.meta.env.VITE_TELEGRAM_BOT_USERNAME || "StickerStreetBot"}`} target="_blank" rel="noopener noreferrer" style={{ display: "inline-block", padding: "10px 18px", background: "#0088CC", color: "#fff", borderRadius: 12, fontWeight: 700, fontSize: 14, textDecoration: "none", fontFamily: "'Poppins',sans-serif" }}>Ouvrir le bot Telegram →</a>
-              </div>
-            ) : (
-              <div style={{ fontSize: 13, color: t.textSec, marginTop: 8 }}>Connecte ton wallet TON ci-dessous ou paye avec tes Stars.</div>
-            )}
-          </div>
-        </div>
-      )}
-
-      {pay === "ton" && (
-        <div style={{ marginBottom: 18, animation: "fadeUp 0.3s ease" }}>
-          <div style={{ ...card, borderRadius: 20, padding: "20px 18px", border: "2px solid #0098EA33" }}>
-            <div style={{ display: "flex", alignItems: "center", gap: 10, marginBottom: 16 }}>
-              <div style={{ width: 44, height: 44, borderRadius: 14, background: "#0098EA15", display: "flex", alignItems: "center", justifyContent: "center", fontSize: 24 }}>{S.diamond}</div>
-              <div>
-                <div style={{ fontWeight: 800, fontSize: 16 }}>Paiement en TON</div>
-                <div style={{ fontFamily: "'Inter',sans-serif", fontSize: 12, color: t.textSec }}>Cours en temps réel — conversion XOF → TON</div>
-              </div>
-            </div>
-            {tonRateLoading && (
-              <div style={{ fontFamily: "'Inter',sans-serif", fontSize: 13, color: t.textMuted, marginBottom: 12 }}>Chargement du cours TON…</div>
-            )}
-            {tonRateError && (
-              <div style={{ fontFamily: "'Inter',sans-serif", fontSize: 13, color: "#E17055", marginBottom: 12 }}>⚠ {tonRateError}</div>
-            )}
-            {tonRate && !tonRateError && (
-              <div style={{ marginBottom: 12, padding: "12px 14px", background: t.bgAlt, borderRadius: 12 }}>
-                <div style={{ fontFamily: "'Inter',sans-serif", fontSize: 13, color: t.textSec }}>≈ <strong style={{ color: t.text }}>{tonRate.amount_ton?.toFixed(4)} TON</strong> à payer</div>
-                <div style={{ fontFamily: "'Inter',sans-serif", fontSize: 11, color: t.textMuted, marginTop: 4 }}>Cours actuel : 1 TON ≈ {tonRate.ton_usd} $</div>
-              </div>
-            )}
-            {!TON_MERCHANT && (
-              <div style={{ marginBottom: 12, padding: "12px 14px", background: t.warn, borderRadius: 12, border: `1px solid ${t.warnBorder}` }}>
-                <div style={{ fontWeight: 700, fontSize: 13, color: "#E17055" }}>Paiement TON indisponible</div>
-                <div style={{ fontFamily: "'Inter',sans-serif", fontSize: 12, color: t.textSec, marginTop: 4 }}>L'adresse wallet marchand n'est pas encore configurée.</div>
-              </div>
-            )}
-            {!tonAddress ? (
-              <div style={{ display: "flex", justifyContent: "center" }}>
-                <TonConnectButton style={{ margin: 0 }} />
-              </div>
-            ) : (
-              <div style={{ fontFamily: "'Inter',sans-serif", fontSize: 13, color: t.textSec }}>
-                ✓ Wallet connecté · {tonAddress.slice(0, 6)}…{tonAddress.slice(-4)}
-              </div>
-            )}
-          </div>
-        </div>
-      )}
-
-      {pay === "momo" && (
-        <div style={{ marginBottom: 18, animation: "fadeUp 0.3s ease" }}>
-          <div style={{ ...card, borderRadius: 20, padding: "20px 18px", border: "2px solid #FF660033" }}>
-            <div style={{ display: "flex", alignItems: "center", gap: 10, marginBottom: 16 }}>
-              <div style={{ width: 44, height: 44, borderRadius: 14, background: "#FF660015", display: "flex", alignItems: "center", justifyContent: "center", fontSize: 24 }}>{S.phone}</div>
-              <div>
-                <div style={{ fontWeight: 800, fontSize: 16 }}>Paiement Mobile Money</div>
-                <div style={{ fontFamily: "'Inter',sans-serif", fontSize: 12, color: t.textSec }}>Choisis Wave ou Djamo et envoie le montant</div>
-              </div>
-            </div>
-            <div style={{ display: "flex", flexDirection: "column", gap: 8 }}>
-              {momoList.map((op) => (
-                <div key={op.id} onClick={() => setMomoOp(momoOp === op.id ? null : op.id)} style={{ display: "flex", alignItems: "center", justifyContent: "space-between", padding: "14px 16px", borderRadius: 14, cursor: "pointer", transition: "all 0.2s", background: momoOp === op.id ? op.color + "12" : t.bgAlt, border: momoOp === op.id ? `2px solid ${op.color}44` : `2px solid ${t.cardBorder}` }}>
-                  <div style={{ display: "flex", alignItems: "center", gap: 12 }}>
-                    <span style={{ fontSize: 24 }}>{op.logo}</span>
-                    <div>
-                      <div style={{ fontWeight: 700, fontSize: 14, color: momoOp === op.id ? op.color : t.text }}>{op.name}</div>
-                      <div style={{ fontFamily: "'Inter',sans-serif", fontSize: 13, color: t.textSec, fontWeight: 500 }}>{op.link ? "Lien direct" : op.qrImage ? "Scanner le QR" : op.num}</div>
-                    </div>
-                  </div>
-                  {op.link ? (
-                    <a href={op.link} target="_blank" rel="noopener noreferrer" onClick={(e) => e.stopPropagation()} style={{ padding: "8px 14px", borderRadius: 10, border: "none", cursor: "pointer", fontFamily: "'Poppins',sans-serif", fontWeight: 600, fontSize: 12, background: op.color + "22", color: op.color, textDecoration: "none", transition: "all 0.2s" }}>Payer →</a>
-                  ) : op.qrImage ? (
-                    <a href={op.qrImage} target="_blank" rel="noopener noreferrer" onClick={(e) => e.stopPropagation()} style={{ padding: "8px 14px", borderRadius: 10, border: "none", cursor: "pointer", fontFamily: "'Poppins',sans-serif", fontWeight: 600, fontSize: 12, background: op.color + "22", color: op.color, textDecoration: "none", transition: "all 0.2s" }}>Payer avec Wave →</a>
-                  ) : (
-                    <button onClick={(e) => { e.stopPropagation(); copyNum(op.num, op.id); }} style={{ padding: "8px 14px", borderRadius: 10, border: "none", cursor: "pointer", fontFamily: "'Poppins',sans-serif", fontWeight: 600, fontSize: 12, background: copied === op.id ? "#00C48C22" : t.bgAlt, color: copied === op.id ? "#00C48C" : t.textSec, transition: "all 0.2s" }}>{copied === op.id ? "✓ Copié" : "Copier"}</button>
-                  )}
-                </div>
-              ))}
-            </div>
-            {momoList.some((op) => op.qrImage && momoOp === op.id) && (() => {
-              const waveOp = momoList.find((op) => op.qrImage && momoOp === op.id);
-              return (
-                <div style={{ marginTop: 16, padding: 16, background: (waveOp?.color || "#F7931A") + "12", borderRadius: 14, border: `2px solid ${(waveOp?.color || "#F7931A")}33", display: "flex", flexDirection: "column", alignItems: "center", gap: 12 }}>
-                  <div style={{ fontWeight: 700, fontSize: 14, color: waveOp?.color }}>Scanner le QR code Wave</div>
-                  <img src={waveOp?.qrImage} alt="QR Wave" style={{ width: 160, height: 160, objectFit: "contain", borderRadius: 12 }} />
-                  <a href={waveOp?.qrImage} target="_blank" rel="noopener noreferrer" style={{ padding: "10px 18px", borderRadius: 10, fontFamily: "'Poppins',sans-serif", fontWeight: 600, fontSize: 13, background: (waveOp?.color || "#F7931A") + "22", color: waveOp?.color, textDecoration: "none" }}>Payer avec Wave →</a>
-                </div>
-              );
-            })()}
-            <div style={{ marginTop: 16, padding: "14px 16px", background: t.warn, borderRadius: 12, border: `1px solid ${t.warnBorder}` }}>
-              <div style={{ fontWeight: 700, fontSize: 13, color: "#E17055", marginBottom: 8 }}>Instructions :</div>
-              <div style={{ fontFamily: "'Inter',sans-serif", fontSize: 13, color: t.textSec, lineHeight: 1.6 }}>
-                1. Choisis <strong>Wave</strong> (scanne le QR) ou <strong>Djamo</strong> (clique sur Payer →)<br />
-                2. Envoie <span style={{ fontWeight: 700, color: t.text }}>{XOF_FMT(totalXof)}</span> via l’app Wave ou Djamo<br />
-                3. Clique sur « Confirmer le paiement »<br />
-                4. On vérifie et on lance ta commande !
-              </div>
-            </div>
-          </div>
-        </div>
-      )}
-
-      <div style={{ display: "flex", flexDirection: "column", gap: 10 }}>
+      <div className="cart-list">
         {cart.map((item, i) => (
-          <div key={i} style={{ display: "flex", alignItems: "center", gap: 14, ...card, padding: "14px 16px", borderRadius: 18 }}>
-            <div style={{ width: 50, height: 50, borderRadius: 14, background: item.img ? "#f5f5f3" : item.grad, display: "flex", alignItems: "center", justifyContent: "center", fontSize: 24, flexShrink: 0, overflow: "hidden" }}>
-              {item.img ? <img src={item.img} alt={item.name} style={{ width: "100%", height: "100%", objectFit: "cover" }} /> : <span>{item.emoji}</span>}
+          <div key={`${item.id}-${item.sz}`} className="card cart-item">
+            <div className="cart-thumb" style={!item.img && item.grad ? { background: item.grad } : undefined}>
+              {item.img ? <img src={item.img} alt="" /> : <span>{item.emoji}</span>}
             </div>
-            <div style={{ flex: 1, minWidth: 0 }}>
-              <div style={{ fontWeight: 700, fontSize: 14, whiteSpace: "nowrap", overflow: "hidden", textOverflow: "ellipsis" }}>{item.name}</div>
-              <div style={{ fontFamily: "'Inter',sans-serif", fontSize: 12, color: t.textMuted }}>{item.sz}{item.dsgn ? " · 🎨 Perso" : ""}</div>
+            <div className="cart-info">
+              <div className="cart-name">{item.name}</div>
+              <div className="cart-meta">{[item.sz, item.dsgn && "Design perso"].filter(Boolean).join(" · ")}</div>
+              <div className="qty">
+                <button onClick={() => updQty(i, item.qty - 1)} disabled={item.qty <= 1} aria-label="Moins"><Icon name="minus" size={15} /></button>
+                <span className="num">{item.qty}</span>
+                <button onClick={() => updQty(i, item.qty + 1)} aria-label="Plus"><Icon name="plus" size={15} /></button>
+              </div>
             </div>
-            <div style={{ display: "flex", alignItems: "center", gap: 6, flexShrink: 0 }}>
-              <button onClick={() => updQty(i, item.qty - 1)} style={sqBtn}>−</button>
-              <span style={{ fontFamily: "'Inter',sans-serif", fontWeight: 700, fontSize: 14, minWidth: 20, textAlign: "center" }}>{item.qty}</span>
-              <button onClick={() => updQty(i, item.qty + 1)} style={sqBtn}>+</button>
+            <div className="cart-side">
+              <button className="cart-remove" onClick={() => rm(i)} aria-label={`Retirer ${item.name}`}><Icon name="close" size={17} /></button>
+              <span className="cart-line-total num">{XOF_FMT(item.xof * item.qty)}</span>
             </div>
-            <div style={{ fontFamily: "'Inter',sans-serif", fontWeight: 700, fontSize: 14, minWidth: 70, textAlign: "right" }}>
-              {XOF_FMT(item.xof * item.qty)}
-            </div>
-            <button onClick={() => rm(i)} style={{ background: "none", border: "none", color: "#D1D5DB", cursor: "pointer", padding: 4, fontSize: 16 }}>{S.close}</button>
           </div>
         ))}
       </div>
 
-      <div style={{ marginTop: 24, ...card, borderRadius: 22, padding: "22px 24px" }}>
-        <div style={{ display: "flex", justifyContent: "space-between", alignItems: "center", marginBottom: 18 }}>
-          <span style={{ fontWeight: 500, fontSize: 14, color: t.textMuted, letterSpacing: 1, textTransform: "uppercase" }}>Total</span>
-          <span style={{ fontWeight: 800, fontSize: 26 }}>{XOF_FMT(totalXof)}</span>
+      {missingContact && (
+        <div className="notice" style={{ marginTop: 12, display: "flex", alignItems: "center", gap: 12 }}>
+          <div style={{ flex: 1 }}>
+            <div className="notice-title">Coordonnées de livraison</div>
+            Ajoute ton nom et ton téléphone pour qu'on puisse te livrer.
+          </div>
+          <button className="btn btn-sm btn-ink" onClick={() => go("profil")}>Compléter</button>
         </div>
-        <button
-          onClick={async () => {
-            if (pay === "stars") {
-              if (tgWebApp?.openInvoice) {
-                setStarsLoading(true);
-                try {
-                  const items = cart.map((i) => ({ id: i.id, name: i.name, emoji: i.emoji, qty: i.qty, sz: i.sz, price: i.price, ton: i.ton, xof: i.xof }));
-                  const { url } = await createInvoiceStars(items, totalXof, profile);
-                  const onClosed = (e) => {
-                    setStarsLoading(false);
-                    if (e?.status === "paid") checkout();
-                    tgWebApp?.offEvent?.("invoiceClosed", onClosed);
-                  };
-                  tgWebApp.onEvent("invoiceClosed", onClosed);
-                  tgWebApp.openInvoice(url);
-                } catch (err) {
-                  setStarsLoading(false);
-                  alert(err.message || "Erreur facture Stars");
-                }
-              } else {
-                await checkout();
-              }
-            } else if (pay === "ton") {
-              if (!tonAddress) return;
-              if (!tonRate?.amount_ton) {
-                alert("Cours TON indisponible. Réessaie dans un instant.");
-                return;
-              }
-              if (!TON_MERCHANT) return;
-              setTonLoading(true);
-              try {
-                const amountTon = tonRate.amount_ton;
-                const amountNano = BigInt(Math.round(amountTon * 1e9));
-                await tonConnectUI.sendTransaction({
-                  validUntil: Math.floor(Date.now() / 1000) + 300,
-                  messages: [{ address: TON_MERCHANT, amount: amountNano.toString() }],
-                });
-                await checkout();
-              } catch (err) {
-                if (!String(err).includes("declined")) console.error(err);
-              } finally {
-                setTonLoading(false);
-              }
-            } else {
-              await checkout();
-            }
-          }}
-          disabled={(pay === "ton" && (!tonAddress || tonLoading || !tonRate?.amount_ton || !TON_MERCHANT)) || (pay === "stars" && starsLoading) || (pay === "momo" && checkoutLoading)}
-          style={{ width: "100%", padding: 17, background: pay === "ton" ? "linear-gradient(135deg,#0098EA,#0078C8)" : pay === "momo" ? "linear-gradient(135deg,#FF6600,#E85D00)" : "linear-gradient(135deg,#FF3B5C,#E02D50)", color: "#fff", border: "none", borderRadius: 16, fontWeight: 700, fontSize: 16, cursor: (pay === "ton" && (!tonAddress || tonLoading || !tonRate?.amount_ton || !TON_MERCHANT)) || (pay === "stars" && starsLoading) || (pay === "momo" && checkoutLoading) ? "not-allowed" : "pointer", fontFamily: "'Poppins',sans-serif", letterSpacing: 0.5, boxShadow: pay === "ton" ? "0 6px 20px rgba(0,152,234,0.28)" : pay === "momo" ? "0 6px 20px rgba(255,102,0,0.28)" : "0 6px 20px rgba(255,59,92,0.28)", opacity: (pay === "ton" && (!tonAddress || tonLoading || !tonRate?.amount_ton || !TON_MERCHANT)) || (pay === "stars" && starsLoading) || (pay === "momo" && checkoutLoading) ? 0.7 : 1 }}>
-          {pay === "ton" ? (tonLoading ? "Envoi en cours…" : tonAddress && tonRate ? `Payer ≈ ${tonRate.amount_ton.toFixed(4)} TON (${XOF_FMT(totalXof)})` : "Connecte ton wallet") : pay === "momo" ? (checkoutLoading ? "Enregistrement…" : "Confirmer le paiement") : pay === "stars" ? (starsLoading ? "Ouverture paiement…" : tgWebApp ? `Payer ${XOF_FMT(totalXof)} en Stars` : "Confirmer sans paiement") : "Confirmer"}
-        </button>
+      )}
+
+      <div className="section-head"><h2>Paiement</h2></div>
+      <div className="segmented" role="tablist" aria-label="Moyen de paiement">
+        {METHODS.map((m) => (
+          <button key={m.id} role="tab" aria-selected={pay === m.id} className={pay === m.id ? "is-active" : ""} onClick={() => setPay(m.id)}>
+            <Icon name={m.icon} size={16} fill={m.id === "stars" && pay === m.id} strokeWidth={m.id === "stars" && pay === m.id ? 0 : 2} /> {m.label}
+          </button>
+        ))}
+      </div>
+
+      {pay === "momo" && (
+        <div className="card pay-panel">
+          <div className="pay-ops">
+            {momoList.map((op) => (
+              <button
+                key={op.id}
+                className="pay-op"
+                style={{ border: `2px solid ${momoOp === op.id ? op.color || "var(--brand)" : "transparent"}`, textAlign: "left" }}
+                onClick={() => setMomoOp(op.id)}
+                aria-pressed={momoOp === op.id}
+              >
+                <span>{op.name}<small>{op.hint}</small></span>
+                {momoOp === op.id && <Icon name="check" size={18} style={{ color: op.color }} />}
+              </button>
+            ))}
+          </div>
+          {momoOp === "wave" && (
+            <div style={{ marginTop: 12, textAlign: "center" }}>
+              <img src={WAVE_QR_URL} alt="QR code Wave StickerStreet" style={{ width: 180, height: 180, objectFit: "contain", margin: "0 auto", borderRadius: 14, background: "#fff", padding: 8 }} />
+            </div>
+          )}
+          {momoOp === "djamo" && (
+            <a className="btn btn-ghost btn-block" style={{ marginTop: 12 }} href={momoList.find((o) => o.id === "djamo")?.link} target="_blank" rel="noopener noreferrer">
+              Ouvrir le lien Djamo <Icon name="arrow" size={16} />
+            </a>
+          )}
+          <ol className="steps-list">
+            <li>Envoie exactement <b className="num">{XOF_FMT(totalXof)}</b></li>
+            <li>Reviens ici et valide ta commande</li>
+            <li>On vérifie le paiement et on lance l'impression</li>
+          </ol>
+        </div>
+      )}
+
+      {pay === "stars" && (
+        <div className="card pay-panel">
+          <div className="pay-head">
+            <div className="pay-head-icon" style={{ background: "rgba(245,184,0,0.14)", color: "var(--star)" }}><Icon name="star" size={22} fill strokeWidth={0} /></div>
+            <div><b>Telegram Stars</b><span>Montant converti en Stars au cours du moment, paiement instantané.</span></div>
+          </div>
+          {!starsAvailable && (
+            <div className="notice">
+              <div className="notice-title">Disponible dans l'app Telegram</div>
+              Ouvre le bot <strong>@{BOT_USERNAME}</strong> puis le bouton « Ouvrir l'app » pour payer en Stars.
+            </div>
+          )}
+        </div>
+      )}
+
+      {pay === "ton" && (
+        <div className="card pay-panel">
+          <div className="pay-head">
+            <div className="pay-head-icon" style={{ background: "rgba(0,152,234,0.12)", color: "var(--ton)" }}><Icon name="ton" size={22} /></div>
+            <div><b>Toncoin</b><span>{tonRate ? <>≈ <b className="num" style={{ display: "inline" }}>{tonRate.amount_ton.toFixed(4)} TON</b> · 1 TON ≈ {tonRate.ton_usd} $</> : tonRateError || "Calcul du cours en cours…"}</span></div>
+          </div>
+          {tonAddress && <div className="muted" style={{ fontSize: 13 }}>Wallet connecté · {tonAddress.slice(0, 6)}…{tonAddress.slice(-4)}</div>}
+          {!TON_MERCHANT && <div className="notice"><div className="notice-title">Paiement TON indisponible</div>L'adresse du wallet marchand n'est pas configurée.</div>}
+        </div>
+      )}
+
+      <div className="card summary">
+        <div className="summary-row"><span>Sous-total</span><span className="num">{XOF_FMT(totalXof)}</span></div>
+        <div className="summary-row"><span>Livraison</span><span>Confirmée par le support</span></div>
+        <div className="summary-total"><span>Total</span><b className="num">{XOF_FMT(totalXof)}</b></div>
+        {cta}
       </div>
     </div>
   );

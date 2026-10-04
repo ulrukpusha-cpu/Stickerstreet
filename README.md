@@ -82,12 +82,22 @@ STICKERSTREET_API=http://localhost:5000
 ### API
 
 - Port par défaut : `5000`
-- Données : `shared/data.json` (produits, commandes, statuts, MoMo)
+- Données : Neon (`DATABASE_URL`, entre guillemets dans `.env`) ou, à défaut, `api/data.json` (hors git)
 
 ### Admin webapp
 
-- Code PIN par défaut : **1234**
-- Activation : maintenir 2 secondes sur le logo "STICKERSTREET" dans le header
+- **Depuis Telegram** : les comptes listés dans `ADMIN_TELEGRAM_ID` (api/.env) sont reconnus automatiquement
+  (Profil → « Panel admin »).
+- **Depuis un navigateur** : appui long sur le logo (ou 5 taps sur l'avatar du profil), puis saisir `ADMIN_API_KEY`.
+  La clé est vérifiée par l'API et gardée uniquement pour l'onglet (sessionStorage).
+- ⚠️ Ne jamais mettre `ADMIN_API_KEY` dans `webapp/.env` : toute variable `VITE_*` est copiée dans le JS public.
+
+### Sécurité (résumé)
+
+- Les prix sont recalculés côté API depuis le catalogue ; le client n'envoie que `{id, sz, qty}`.
+- Les clients s'authentifient par `initData` Telegram (Mini App) ou le Login Widget → jeton de session signé.
+- Commandes, profil et chat ne sont accessibles qu'à leur propriétaire ; le chat est un fil par client.
+- Les écritures passent par un verrou (`data_tx`) : pas de commandes perdues avec plusieurs workers gunicorn.
 
 ---
 

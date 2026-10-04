@@ -3,7 +3,9 @@
   <head>
     <meta charset="UTF-8" />
     <meta name="viewport" content="width=device-width, initial-scale=1.0, viewport-fit=cover" />
-    <meta name="theme-color" content="#ff6b35" />
+    <meta name="theme-color" content="#F5F3EE" />
+    <link rel="preconnect" href="https://fonts.googleapis.com" />
+    <link rel="preconnect" href="https://fonts.gstatic.com" crossorigin />
     <meta name="description" content="StickerStreet - Print · Stick · Rep - Stickers, flyers et cartes de visite" />
     <meta name="apple-mobile-web-app-capable" content="yes" />
     <meta name="apple-mobile-web-app-status-bar-style" content="black-translucent" />
@@ -12,10 +14,49 @@
     <link rel="icon" type="image/png" sizes="192x192" href="/icon-192.png" />
     <link rel="apple-touch-icon" href="/icon-192.png" />
     <title>StickerStreet - Print · Stick · Rep</title>
+    <!-- Fond immédiat + thème avant React (évite le flash blanc en mode sombre) -->
+    <style>
+      html, body, #root { margin: 0; min-height: 100%; min-height: 100dvh; }
+      html { background-color: #F5F3EE; }
+      html[data-theme="dark"] { background-color: #0E0F12; }
+    </style>
+    <!-- Doc Mini Apps : charger avant tout autre script JS -->
+    <script src="https://telegram.org/js/telegram-web-app.js?61"></script>
+    <script>
+      (function () {
+        try {
+          var w = window.Telegram && window.Telegram.WebApp;
+          var theme = null;
+          try { theme = JSON.parse(localStorage.getItem("stickerstreet_theme")); } catch (e) {}
+          if (w && w.initData && w.colorScheme) theme = w.colorScheme;
+          if (theme !== "dark" && theme !== "light") theme = window.matchMedia && window.matchMedia("(prefers-color-scheme: dark)").matches ? "dark" : "light";
+          document.documentElement.setAttribute("data-theme", theme);
+          if (!w || !w.initData) return;
+          // Masque le placeholder dès que l’UI minimale peut s’afficher
+          if (typeof w.ready === "function") w.ready();
+          if (typeof w.expand === "function") w.expand();
+          // Harmoniser le fond natif Telegram avec la coque app (évite bandeau blanc pur)
+          var tp = w.themeParams || {};
+          var bg =
+            tp.bg_color ||
+            tp.secondary_bg_color ||
+            tp.bgColor ||
+            tp.secondaryBgColor;
+          if (bg && typeof w.setBackgroundColor === "function") w.setBackgroundColor(bg);
+          // Recommandation Telegram : laisser les swipe verticaux sauf conflit gestuelle
+          if (
+            typeof w.isVersionAtLeast === "function" &&
+            w.isVersionAtLeast("7.7") &&
+            typeof w.enableVerticalSwipes === "function"
+          ) {
+            w.enableVerticalSwipes();
+          }
+        } catch (e) {}
+      })();
+    </script>
   </head>
   <body>
     <div id="root"></div>
-    <script src="https://telegram.org/js/telegram-web-app.js"></script>
     <script type="module" src="/src/main.jsx"></script>
   </body>
 </html>

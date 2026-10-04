@@ -15,8 +15,8 @@ export const STATUSES = {
 };
 
 export const MOMO = [
-  { id: "wave", name: "Wave", num: "0709393959", color: "#F7931A", logo: "💸", qrImage: "/wave-qr.png" },
-  { id: "djamo", name: "Djamo", num: "0709393959", color: "#00D26A", logo: "💳", link: "https://pay.djamo.com/pkbyg" },
+  { id: "wave", name: "Wave", color: "#F7931A", logo: "💸", link: "/wave-qr.png" },
+  { id: "djamo", name: "Djamo", color: "#00D26A", logo: "💳", link: "https://pay.djamo.com/pkbyg" },
 ];
 
 export const XOF_FMT = (v) => v.toLocaleString("fr-FR") + " F";

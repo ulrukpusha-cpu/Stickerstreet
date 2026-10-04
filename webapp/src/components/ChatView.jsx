@@ -1,29 +1,48 @@
 import { useEffect, useRef } from "react";
-import { S } from "../data/constants";
+import Icon from "./Icon";
 
-export default function ChatView({ msgs, ci, setCi, send, title, t }) {
-  const ref = useRef(null);
-  useEffect(() => { ref.current?.scrollIntoView({ behavior: "smooth" }); }, [msgs]);
+const BOT_USERNAME = import.meta.env.VITE_TELEGRAM_BOT_USERNAME || "StickerStreetBot";
+
+export default function ChatView({ msgs, ci, setCi, send, hasSession, go }) {
+  const endRef = useRef(null);
+  useEffect(() => { endRef.current?.scrollIntoView({ behavior: "smooth", block: "end" }); }, [msgs]);
+
+  if (!hasSession) {
+    return (
+      <div className="empty">
+        <div className="empty-icon"><Icon name="chat" size={32} /></div>
+        <h3>Parle-nous sur Telegram</h3>
+        <p>Le chat est lié à ton compte Telegram pour que nos réponses n'arrivent qu'à toi.</p>
+        <a className="btn btn-telegram" href={`https://t.me/${BOT_USERNAME}`} target="_blank" rel="noopener noreferrer">
+          <Icon name="telegram" size={18} /> Ouvrir @{BOT_USERNAME}
+        </a>
+        <button className="btn btn-ghost btn-sm" style={{ marginTop: 6 }} onClick={() => go("profil")}>Me connecter avec Telegram</button>
+      </div>
+    );
+  }
 
   return (
-    <div style={{ display: "flex", flexDirection: "column", height: "calc(100vh - 180px)", animation: "fadeUp 0.3s ease" }}>
-      <h2 style={title}>Support <span style={{ color: "#00C48C" }}>en ligne</span></h2>
-      <p style={{ fontFamily: "'Inter',sans-serif", fontSize: 13, color: t.textMuted, margin: "-8px 0 12px 0" }}>💬 Rejoins aussi notre bot Telegram pour le support</p>
-      <div style={{ flex: 1, overflowY: "auto", display: "flex", flexDirection: "column", gap: 10, paddingBottom: 8 }}>
+    <div className="chat">
+      <div className="chat-head">
+        <div className="chat-avatar">SS</div>
+        <div>
+          <b>Support StickerStreet</b>
+          <span>Réponse en général dans la journée</span>
+        </div>
+      </div>
+      <div className="chat-scroll" aria-live="polite">
         {msgs.map((m, i) => (
-          <div key={i} style={{ display: "flex", justifyContent: m.from === "user" ? "flex-end" : "flex-start" }}>
-            <div style={{ maxWidth: "80%", padding: "13px 18px", borderRadius: 18, background: m.from === "user" ? "#FF3B5C" : t.card, color: m.from === "user" ? "#fff" : t.text, border: m.from === "user" ? "none" : `1px solid ${t.cardBorder}`, borderBottomRightRadius: m.from === "user" ? 4 : 18, borderBottomLeftRadius: m.from === "bot" ? 4 : 18, boxShadow: m.from === "user" ? "0 2px 12px rgba(255,59,92,0.2)" : t.shadow }}>
-              <div style={{ fontFamily: "'Inter',sans-serif", fontSize: 15, lineHeight: 1.5 }}>{m.text}</div>
-              <div style={{ fontFamily: "'Inter',sans-serif", fontSize: 11, textAlign: "right", marginTop: 4, color: m.from === "user" ? "rgba(255,255,255,0.65)" : t.textMuted }}>{m.time}</div>
-            </div>
+          <div key={i} className={`bubble ${m.from === "user" ? "me" : "them"}`} style={m.pending ? { opacity: 0.7 } : undefined}>
+            {m.text}
+            <time>{m.time}</time>
           </div>
         ))}
-        <div ref={ref} />
+        <div ref={endRef} />
       </div>
-      <div style={{ display: "flex", gap: 10, paddingTop: 10 }}>
-        <input value={ci} onChange={(e) => setCi(e.target.value)} onKeyDown={(e) => e.key === "Enter" && send()} placeholder="Écris ton message..." style={{ flex: 1, padding: "15px 18px", background: t.card, border: `1px solid ${t.cardBorder}`, borderRadius: 16, fontFamily: "'Inter',sans-serif", fontSize: 15, color: t.text, outline: "none" }} />
-        <button onClick={send} style={{ width: 52, height: 52, borderRadius: 16, background: "#FF3B5C", border: "none", cursor: "pointer", display: "flex", alignItems: "center", justifyContent: "center", boxShadow: "0 4px 14px rgba(255,59,92,0.2)", flexShrink: 0, fontSize: 22, color: "#fff" }}>{S.send}</button>
-      </div>
+      <form className="composer" onSubmit={(e) => { e.preventDefault(); send(); }}>
+        <input className="input" value={ci} onChange={(e) => setCi(e.target.value)} placeholder="Écris ton message…" aria-label="Message" maxLength={2000} />
+        <button type="submit" className="btn btn-primary" disabled={!ci.trim()} aria-label="Envoyer"><Icon name="send" size={19} /></button>
+      </form>
     </div>
   );
 }

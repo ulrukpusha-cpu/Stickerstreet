@@ -9,6 +9,9 @@
 **/node_modules/
 **/dist/
 
+# Fichiers uploadés sans Vercel Blob
+api/local_uploads/
+
 # Python
 **/__pycache__/
 **/*.pyc
@@ -24,3 +27,8 @@
 Thumbs.db
 .vscode/
 .idea/
+
+# Données réelles (clients, commandes) : jamais dans git — le dépôt est public
+api/data.json
+api/.stickerstreet-data.lock
+api/gunicorn.ctl
