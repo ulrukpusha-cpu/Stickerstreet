@@ -14,9 +14,21 @@ export const STATUSES = {
   delivered: { label: "Livrée", color: "#00CEC9", icon: "🎉" },
 };
 
-export const MOMO = [
-  { id: "wave", name: "Wave", color: "#F7931A", logo: "💸", link: "/wave-qr.png" },
-  { id: "djamo", name: "Djamo", color: "#00D26A", logo: "💳", link: "https://pay.djamo.com/pkbyg" },
-];
+/** Opérateurs Mobile Money via Jèko (couleurs indicatives des marques). */
+export const JEKO_OPERATOR_STYLE = {
+  wave: { color: "#1DC8F2", short: "W" },
+  orange: { color: "#FF7900", short: "OM" },
+  mtn: { color: "#FFCC00", ink: "#16161B", short: "MTN" },
+  moov: { color: "#0058A3", short: "M" },
+  djamo: { color: "#16161B", short: "D" },
+};
+
+export const PAY_LABELS = { jeko: "Mobile Money", momo: "Mobile Money", wave: "Wave", djamo: "Djamo", ton: "TON", stars: "Stars" };
+export const PAYMENT_STATUS = {
+  awaiting: { label: "Paiement en attente", color: "#D97E06" },
+  paid: { label: "Payée", color: "#0E9F7A" },
+  failed: { label: "Paiement échoué", color: "#E03131" },
+  review: { label: "Paiement à vérifier", color: "#D97E06" },
+};
 
 export const XOF_FMT = (v) => v.toLocaleString("fr-FR") + " F";

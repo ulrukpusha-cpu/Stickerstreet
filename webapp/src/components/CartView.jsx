@@ -1,31 +1,15 @@
 import { useState, useEffect } from "react";
 import { useTonConnectUI, useTonAddress, TonConnectButton } from "@tonconnect/ui-react";
 import Icon from "./Icon";
-import { XOF_FMT, MOMO } from "../data/constants";
-import { fetchMomo, createInvoiceStars, fetchTonRate } from "../api";
+import { XOF_FMT, JEKO_OPERATOR_STYLE } from "../data/constants";
+import { createInvoiceStars, fetchTonRate } from "../api";
 
 const TON_MERCHANT = import.meta.env.VITE_TON_MERCHANT_ADDRESS || "";
 const BOT_USERNAME = import.meta.env.VITE_TELEGRAM_BOT_USERNAME || "StickerStreetBot";
-const WAVE_QR_URL = "/wave-qr.png";
 
-function normalizeMomoOps(list) {
-  const safe = Array.isArray(list) ? list : [];
-  return safe
-    .filter((op) => op?.id === "wave" || op?.id === "djamo")
-    .map((op) => (op.id === "wave"
-      ? { ...op, name: op.name || "Wave", hint: "Scanne le QR Wave" }
-      : { ...op, name: op.name || "Djamo", link: op.link || "https://pay.djamo.com/pkbyg", hint: "Paie via le lien Djamo" }));
-}
-
-const METHODS = [
-  { id: "momo", label: "MoMo", icon: "phone" },
-  { id: "stars", label: "Stars", icon: "star" },
-  { id: "ton", label: "TON", icon: "ton" },
-];
-
-export default function CartView({ cart, totalXof, pay, setPay, rm, updQty, checkout, checkoutLoading = false, profile, hasSession, onStarsPaid, go, notify }) {
-  const [momoOp, setMomoOp] = useState("wave");
-  const [momoList, setMomoList] = useState(() => normalizeMomoOps(MOMO));
+export default function CartView({ cart, totalXof, pay, setPay, rm, updQty, checkout, profile, hasSession, onStarsPaid, payJeko, jeko, go, notify }) {
+  const [operator, setOperator] = useState("wave");
+  const [jekoLoading, setJekoLoading] = useState(false);
   const [starsLoading, setStarsLoading] = useState(false);
   const [tonRate, setTonRate] = useState(null);
   const [tonRateError, setTonRateError] = useState("");
@@ -35,12 +19,16 @@ export default function CartView({ cart, totalXof, pay, setPay, rm, updQty, chec
   const tg = typeof window !== "undefined" && window.Telegram?.WebApp?.initData ? window.Telegram.WebApp : null;
   const starsAvailable = !!tg?.openInvoice && hasSession;
 
-  useEffect(() => {
-    fetchMomo().then((ops) => setMomoList(normalizeMomoOps(ops))).catch(() => {});
-  }, []);
+  const methods = [
+    jeko?.enabled && { id: "jeko", label: "MoMo", icon: "phone" },
+    { id: "stars", label: "Stars", icon: "star" },
+    { id: "ton", label: "TON", icon: "ton" },
+  ].filter(Boolean);
+  // Si le moyen mémorisé n'est plus proposé (ex. Jèko pas encore configuré), on prend le premier disponible
+  const method = methods.some((m) => m.id === pay) ? pay : methods[0].id;
 
   useEffect(() => {
-    if (pay !== "ton" || !totalXof) {
+    if (method !== "ton" || !totalXof) {
       setTonRate(null);
       setTonRateError("");
       return;
@@ -48,7 +36,7 @@ export default function CartView({ cart, totalXof, pay, setPay, rm, updQty, chec
     fetchTonRate(totalXof)
       .then((r) => { setTonRate(r); setTonRateError(""); })
       .catch((e) => setTonRateError(e.message || "Cours indisponible"));
-  }, [pay, totalXof]);
+  }, [method, totalXof]);
 
   if (!cart.length) {
     return (
@@ -63,6 +51,18 @@ export default function CartView({ cart, totalXof, pay, setPay, rm, updQty, chec
 
   const count = cart.reduce((s, i) => s + i.qty, 0);
   const missingContact = !profile?.name || !profile?.phone;
+  const operators = jeko?.operators || [];
+  const opLabel = operators.find((o) => o.id === operator)?.label || "Mobile Money";
+
+  const startJeko = async () => {
+    setJekoLoading(true);
+    try {
+      await payJeko(operator); // redirige vers la page de paiement Jèko
+    } catch (err) {
+      notify(err.message || "Paiement indisponible, réessaie");
+      setJekoLoading(false);
+    }
+  };
 
   const payStars = async () => {
     setStarsLoading(true);
@@ -100,22 +100,23 @@ export default function CartView({ cart, totalXof, pay, setPay, rm, updQty, chec
   };
 
   let cta;
-  if (pay === "stars") {
+  if (method === "jeko") {
+    cta = (
+      <button className="btn btn-primary btn-block" onClick={startJeko} disabled={jekoLoading}>
+        <Icon name="lock" size={17} />
+        {jekoLoading ? "Redirection vers le paiement…" : `Payer ${XOF_FMT(totalXof)} avec ${opLabel}`}
+      </button>
+    );
+  } else if (method === "stars") {
     cta = starsAvailable
       ? <button className="btn btn-primary btn-block" onClick={payStars} disabled={starsLoading}><Icon name="star" size={18} fill strokeWidth={0} />{starsLoading ? "Ouverture du paiement…" : `Payer ${XOF_FMT(totalXof)} en Stars`}</button>
       : <a className="btn btn-telegram btn-block" href={`https://t.me/${BOT_USERNAME}`} target="_blank" rel="noopener noreferrer"><Icon name="telegram" size={18} />Ouvrir dans Telegram</a>;
-  } else if (pay === "ton") {
+  } else {
     cta = !tonAddress
       ? <div style={{ display: "flex", justifyContent: "center" }}><TonConnectButton /></div>
       : <button className="btn btn-ton btn-block" onClick={payTon} disabled={tonLoading || !tonRate?.amount_ton || !TON_MERCHANT}>
           <Icon name="ton" size={18} />{tonLoading ? "Envoi en cours…" : tonRate ? `Payer ≈ ${tonRate.amount_ton.toFixed(3)} TON` : "Calcul du cours…"}
         </button>;
-  } else {
-    cta = (
-      <button className="btn btn-primary btn-block" onClick={() => checkout({ payment_method: momoOp || "momo" })} disabled={checkoutLoading}>
-        {checkoutLoading ? "Enregistrement…" : "J'ai payé — valider ma commande"}
-      </button>
-    );
   }
 
   return (
@@ -156,49 +157,37 @@ export default function CartView({ cart, totalXof, pay, setPay, rm, updQty, chec
       )}
 
       <div className="section-head"><h2>Paiement</h2></div>
-      <div className="segmented" role="tablist" aria-label="Moyen de paiement">
-        {METHODS.map((m) => (
-          <button key={m.id} role="tab" aria-selected={pay === m.id} className={pay === m.id ? "is-active" : ""} onClick={() => setPay(m.id)}>
-            <Icon name={m.icon} size={16} fill={m.id === "stars" && pay === m.id} strokeWidth={m.id === "stars" && pay === m.id ? 0 : 2} /> {m.label}
-          </button>
-        ))}
-      </div>
-
-      {pay === "momo" && (
-        <div className="card pay-panel">
-          <div className="pay-ops">
-            {momoList.map((op) => (
-              <button
-                key={op.id}
-                className="pay-op"
-                style={{ border: `2px solid ${momoOp === op.id ? op.color || "var(--brand)" : "transparent"}`, textAlign: "left" }}
-                onClick={() => setMomoOp(op.id)}
-                aria-pressed={momoOp === op.id}
-              >
-                <span>{op.name}<small>{op.hint}</small></span>
-                {momoOp === op.id && <Icon name="check" size={18} style={{ color: op.color }} />}
-              </button>
-            ))}
-          </div>
-          {momoOp === "wave" && (
-            <div style={{ marginTop: 12, textAlign: "center" }}>
-              <img src={WAVE_QR_URL} alt="QR code Wave StickerStreet" style={{ width: 180, height: 180, objectFit: "contain", margin: "0 auto", borderRadius: 14, background: "#fff", padding: 8 }} />
-            </div>
-          )}
-          {momoOp === "djamo" && (
-            <a className="btn btn-ghost btn-block" style={{ marginTop: 12 }} href={momoList.find((o) => o.id === "djamo")?.link} target="_blank" rel="noopener noreferrer">
-              Ouvrir le lien Djamo <Icon name="arrow" size={16} />
-            </a>
-          )}
-          <ol className="steps-list">
-            <li>Envoie exactement <b className="num">{XOF_FMT(totalXof)}</b></li>
-            <li>Reviens ici et valide ta commande</li>
-            <li>On vérifie le paiement et on lance l'impression</li>
-          </ol>
+      {methods.length > 1 && (
+        <div className="segmented" role="tablist" aria-label="Moyen de paiement">
+          {methods.map((m) => (
+            <button key={m.id} role="tab" aria-selected={method === m.id} className={method === m.id ? "is-active" : ""} onClick={() => setPay(m.id)}>
+              <Icon name={m.icon} size={16} fill={m.id === "stars" && method === m.id} strokeWidth={m.id === "stars" && method === m.id ? 0 : 2} /> {m.label}
+            </button>
+          ))}
         </div>
       )}
 
-      {pay === "stars" && (
+      {method === "jeko" && (
+        <div className="card pay-panel">
+          <div className="op-grid" role="radiogroup" aria-label="Opérateur">
+            {operators.map((op) => {
+              const st = JEKO_OPERATOR_STYLE[op.id] || {};
+              return (
+                <button key={op.id} role="radio" aria-checked={operator === op.id} className={`op${operator === op.id ? " is-active" : ""}`} onClick={() => setOperator(op.id)} style={operator === op.id ? { borderColor: st.color } : undefined}>
+                  <span className="op-logo" style={{ background: st.color, color: st.ink || "#fff" }}>{st.short || op.label[0]}</span>
+                  <span className="op-name">{op.label}</span>
+                </button>
+              );
+            })}
+          </div>
+          <div className="pay-secure">
+            <Icon name="lock" size={15} />
+            <span>Paiement sécurisé par <b>Jèko</b> : tu valides sur la page {opLabel}, puis tu reviens ici automatiquement.</span>
+          </div>
+        </div>
+      )}
+
+      {method === "stars" && (
         <div className="card pay-panel">
           <div className="pay-head">
             <div className="pay-head-icon" style={{ background: "rgba(245,184,0,0.14)", color: "var(--star)" }}><Icon name="star" size={22} fill strokeWidth={0} /></div>
@@ -213,7 +202,7 @@ export default function CartView({ cart, totalXof, pay, setPay, rm, updQty, chec
         </div>
       )}
 
-      {pay === "ton" && (
+      {method === "ton" && (
         <div className="card pay-panel">
           <div className="pay-head">
             <div className="pay-head-icon" style={{ background: "rgba(0,152,234,0.12)", color: "var(--ton)" }}><Icon name="ton" size={22} /></div>

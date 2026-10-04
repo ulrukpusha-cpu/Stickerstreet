@@ -1,8 +1,7 @@
 import Icon from "./Icon";
-import { XOF_FMT, STATUSES } from "../data/constants";
+import { XOF_FMT, STATUSES, PAY_LABELS, PAYMENT_STATUS } from "../data/constants";
 
 const STEP_LABELS = ["Reçue", "Confirmée", "Impression", "Expédiée", "Livrée"];
-const PAY_LABELS = { momo: "Mobile Money", wave: "Wave", djamo: "Djamo", ton: "TON", stars: "Stars" };
 
 function formatDate(o) {
   const d = new Date(o.created_at || o.date);
@@ -58,6 +57,11 @@ export default function OrdersView({ orders, go }) {
                 <span className="muted" style={{ fontSize: 13 }}>{o.items.reduce((s, it) => s + it.qty, 0)} article(s)</span>
                 <b className="num">{XOF_FMT(o.totalXof || 0)}</b>
               </div>
+              {PAYMENT_STATUS[o.payment_status] && o.payment_status !== "paid" && (
+                <span className="pay-badge" style={{ background: `${PAYMENT_STATUS[o.payment_status].color}1F`, color: PAYMENT_STATUS[o.payment_status].color }}>
+                  {PAYMENT_STATUS[o.payment_status].label}
+                </span>
+              )}
             </article>
           );
         })}

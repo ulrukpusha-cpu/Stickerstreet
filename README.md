@@ -103,9 +103,16 @@ STICKERSTREET_API=http://localhost:5000
 
 ## Paiements
 
-- Stars (TikTok)
-- TON
-- Mobile Money (Moov, Orange, MTN) — numéros configurables dans `shared/data.json`
+- **Mobile Money via [Jèko](https://developer.jeko.africa)** : Wave, Orange Money, MTN, Moov, Djamo.
+  La commande est créée en « paiement en attente », le client paie sur la page Jèko, puis le webhook signé
+  (`POST /api/webhooks/jeko`, en-tête `Jeko-Signature`) la passe en « payée » et prévient l'admin et le client.
+  - Clés : `python3 scripts/set-jeko-keys.py` (saisie masquée, vérifiée auprès de Jèko)
+  - Webhook à déclarer dans le Cockpit Jèko : `<PUBLIC_APP_URL>/api/webhooks/jeko`, événement `TRANSACTION_COMPLETED`
+  - Tant que les clés ne sont pas configurées, le paiement Mobile Money est masqué dans l'app et le bot.
+- **Telegram Stars** (dans la Mini App), montant vérifié par le bot avant paiement.
+- **TON** (TON Connect) — à vérifier manuellement on-chain avant confirmation.
+
+L'ancien paiement manuel (QR Wave / lien Djamo + bouton « J'ai payé ») a été retiré.
 
 ---
 

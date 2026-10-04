@@ -5,6 +5,7 @@ import {
   fetchProducts, fetchBanners, uploadBlobImage, createProduct, patchProduct, removeProduct,
   createBanner, patchBanner, removeBanner, fetchOrders, fetchMyOrders, createOrder, updateOrderStatus,
   fetchChat, postChatMessage, authTelegramMiniapp, updateProfile,
+  fetchPaymentConfig, createJekoPayment, fetchJekoStatus,
   getSessionToken, setSessionToken, getAdminKey, setAdminKey, checkAdmin,
 } from "./api";
 import { getPriceForSize } from "./utils/productPrice";
@@ -23,11 +24,18 @@ const FavoritesView = lazy(() => import("./components/FavoritesView"));
 
 const VALID_VIEWS = ["home", "profil", "orders", "chat", "cart", "admin", "product", "favorites"];
 const LOCAL_ORDERS_KEY = "stickerstreet_orders";
+const PENDING_PAYMENT_KEY = "stickerstreet_pending_payment";
 
 function getViewFromUrl() {
-  const hash = (window.location.hash || "#/").replace(/^#\/?/, "").toLowerCase();
+  const hash = (window.location.hash || "#/").replace(/^#\/?/, "").split("?")[0].toLowerCase();
   const view = hash.split("/").filter(Boolean)[0] || "home";
   return VALID_VIEWS.includes(view) ? view : "home";
+}
+
+/** Paramètres après « ? » dans le hash (retour de paiement Jèko : #/orders?paiement=retour&ref=…). */
+function getHashParams() {
+  const q = (window.location.hash || "").split("?")[1] || "";
+  return new URLSearchParams(q);
 }
 
 function getProductIdFromUrl() {
@@ -71,7 +79,8 @@ export default function App() {
   const [filter, setFilter] = useState("all");
   const [msgs, setMsgs] = useState([]);
   const [ci, setCi] = useState("");
-  const [pay, setPay] = useState(isTgMiniApp ? "stars" : "momo");
+  const [pay, setPay] = useState(isTgMiniApp ? "stars" : "jeko");
+  const [jeko, setJeko] = useState({ enabled: false, operators: [] });
   const [design, setDesign] = useState(null);
   const [notif, setNotif] = useState("");
   const [atab, setAtab] = useState("orders");
@@ -184,6 +193,10 @@ export default function App() {
   }, [tg, view, go]);
 
   /* ---------- Données ---------- */
+  useEffect(() => {
+    fetchPaymentConfig().then((cfg) => setJeko(cfg?.jeko || { enabled: false, operators: [] })).catch(() => {});
+  }, []);
+
   useEffect(() => {
     fetchProducts()
       .then((rows) => setProducts((rows?.length ? rows : PRODUCTS).map(withVisuals)))
@@ -319,7 +332,7 @@ export default function App() {
   const totalXof = cart.reduce((s, i) => s + i.xof * i.qty, 0);
   const count = cart.reduce((s, i) => s + i.qty, 0);
 
-  const checkout = useCallback(async (payment = { payment_method: "momo" }) => {
+  const checkout = useCallback(async (payment = { payment_method: "ton" }) => {
     if (!cart.length) return;
     setCheckoutLoading(true);
     try {
@@ -342,6 +355,68 @@ export default function App() {
     go("orders");
     setTimeout(loadMyOrders, 2500);
   }, [notify, go, loadMyOrders]);
+
+  /** Mobile Money via Jèko : crée la commande + le paiement puis redirige vers la page Jèko. */
+  const payJeko = useCallback(async (operator) => {
+    const res = await createJekoPayment(cart, operator, profile);
+    writeJson(LOCAL_ORDERS_KEY, [res.order, ...readJson(LOCAL_ORDERS_KEY, [])].slice(0, 30));
+    writeJson(PENDING_PAYMENT_KEY, { ref: res.reference, orderId: res.order.id, at: Date.now() });
+    window.location.assign(res.redirect_url);
+  }, [cart, profile]);
+
+  /**
+   * Retour de Jèko (ou réouverture de l'app) : on suit le paiement en attente jusqu'à confirmation.
+   * Le panier n'est vidé qu'une fois le paiement confirmé par le serveur (webhook Jèko signé).
+   */
+  const [paymentCheck, setPaymentCheck] = useState(0);
+  useEffect(() => {
+    // Retour de paiement sans rechargement complet (même page, seul le hash change)
+    const onHash = () => { if (getHashParams().get("ref")) setPaymentCheck((n) => n + 1); };
+    window.addEventListener("hashchange", onHash);
+    return () => window.removeEventListener("hashchange", onHash);
+  }, []);
+
+  useEffect(() => {
+    const params = getHashParams();
+    const pending = readJson(PENDING_PAYMENT_KEY, null);
+    const ref = params.get("ref") || pending?.ref;
+    if (!ref) return;
+    if (params.get("paiement")) window.history.replaceState(null, "", window.location.hash.split("?")[0]);
+    if (params.get("paiement") === "echec") notify("Paiement annulé ou refusé — ton panier est conservé");
+
+    let tries = 0;
+    let timer;
+    const finish = () => { try { localStorage.removeItem(PENDING_PAYMENT_KEY); } catch { /* ignore */ } };
+    const updateLocal = (st) => writeJson(LOCAL_ORDERS_KEY, readJson(LOCAL_ORDERS_KEY, []).map((o) => (o.id === st.order_id ? { ...o, payment_status: st.payment_status, status: st.status } : o)));
+    const poll = () => {
+      fetchJekoStatus(ref)
+        .then((st) => {
+          updateLocal(st);
+          if (st.payment_status === "paid") {
+            finish();
+            setCart([]);
+            notify(`Paiement confirmé ✓ Commande ${st.order_id}`);
+            loadMyOrders();
+          } else if (st.payment_status === "failed") {
+            finish();
+            if (params.get("paiement") !== "echec") notify("Paiement refusé — ton panier est conservé");
+            loadMyOrders();
+          } else if (st.payment_status === "review") {
+            finish();
+            notify("Paiement reçu, en cours de vérification par l'équipe");
+            loadMyOrders();
+          } else if (++tries < 20) {
+            if (tries === 1 && params.get("paiement") === "retour") notify("Vérification du paiement…");
+            timer = setTimeout(poll, 3000);
+          } else if (pending && Date.now() - pending.at > 2 * 3600 * 1000) {
+            finish(); // abandonné depuis plus de 2 h : on arrête de le suivre
+          }
+        })
+        .catch((err) => { if (err.status === 404) finish(); });
+    };
+    poll();
+    return () => clearTimeout(timer);
+  }, [paymentCheck]); // eslint-disable-line react-hooks/exhaustive-deps
 
   const saveProfile = useCallback(async (next) => {
     setProfile(next);
@@ -551,8 +626,8 @@ export default function App() {
           {view === "cart" && (
             <CartView
               cart={cart} totalXof={totalXof} pay={pay} setPay={setPay} rm={rmCart} updQty={updQty}
-              checkout={checkout} checkoutLoading={checkoutLoading} profile={profile} hasSession={hasSession}
-              onStarsPaid={onStarsPaid} go={go} notify={notify}
+              checkout={checkout} profile={profile} hasSession={hasSession}
+              onStarsPaid={onStarsPaid} payJeko={payJeko} jeko={jeko} go={go} notify={notify}
             />
           )}
           {view === "orders" && <OrdersView orders={orders} go={go} />}

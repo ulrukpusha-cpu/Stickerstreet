@@ -128,7 +128,18 @@ _PUBLIC_UPLOAD_BASE = (os.environ.get("PUBLIC_BASE_URL", "") or "").strip().rstr
 MAX_ITEMS_PER_ORDER = 50
 MAX_QTY_PER_ITEM = 10000
 MAX_TEXT_LEN = 2000
-ORDER_PAYMENT_METHODS = {"momo", "wave", "djamo", "ton"}
+# Paiements « hors facture » acceptés par POST /api/orders (Jèko et Stars ont leurs propres endpoints)
+ORDER_PAYMENT_METHODS = {"ton"}
+
+# Jèko (agrégateur Mobile Money CI) — https://developer.jeko.africa
+JEKO_API_BASE = (os.environ.get("JEKO_API_BASE", "") or "https://api.jeko.africa").strip().rstrip("/")
+JEKO_API_KEY = (os.environ.get("JEKO_API_KEY", "") or "").strip()
+JEKO_API_KEY_ID = (os.environ.get("JEKO_API_KEY_ID", "") or "").strip()
+JEKO_STORE_ID = (os.environ.get("JEKO_STORE_ID", "") or "").strip()
+JEKO_WEBHOOK_SECRET = (os.environ.get("JEKO_WEBHOOK_SECRET", "") or "").strip()
+JEKO_OPERATORS = {"wave": "Wave", "orange": "Orange Money", "mtn": "MTN MoMo", "moov": "Moov Money", "djamo": "Djamo"}
+# URL publique de la webapp (retour client après paiement Jèko) : ngrok aujourd'hui, stickerstreet.ci ensuite
+PUBLIC_APP_URL = (os.environ.get("PUBLIC_APP_URL", "") or "").strip().rstrip("/")
 PRODUCT_CATEGORIES = {"stickers", "flyers", "cartes", "posters", "tshirts", "art", "photo"}
 
 
@@ -913,9 +924,9 @@ def get_orders():
 def create_order():
     """Créer une commande (webapp ou bot). Prix recalculés côté serveur."""
     body = request.get_json(silent=True) or {}
-    payment = str(body.get("payment_method") or "momo").strip().lower()
+    payment = str(body.get("payment_method") or "").strip().lower()
     if payment not in ORDER_PAYMENT_METHODS:
-        return jsonify({"error": "Moyen de paiement invalide (les Stars passent par /api/invoice/stars)"}), 400
+        return jsonify({"error": "Moyen de paiement invalide (Mobile Money : /api/payments/jeko, Stars : /api/invoice/stars)"}), 400
     uid = _acting_user_id(body.get("telegram_user_id"))
     extra = {
         "telegram_user_id": _uid_value(uid) if uid else None,
@@ -938,10 +949,12 @@ def create_order():
 
 
 def _payment_label(order):
+    if order.get("payment_method") == "jeko":
+        return f"Jèko · {JEKO_OPERATORS.get(order.get('payment_operator'), order.get('payment_operator') or 'Mobile Money')}"
     return {
-        "momo": "Mobile Money",
-        "wave": "Wave",
-        "djamo": "Djamo",
+        "momo": "Mobile Money (manuel)",
+        "wave": "Wave (manuel)",
+        "djamo": "Djamo (manuel)",
         "ton": "TON (à vérifier)",
         "stars": "Stars ★",
     }.get(order.get("payment_method"), order.get("payment_method") or "—")
@@ -1365,10 +1378,220 @@ def create_order_from_invoice():
     return jsonify(order), 201
 
 
-@app.route("/api/momo", methods=["GET"])
-def get_momo():
+# ==================== Paiement Jèko ====================
+
+def _jeko_enabled():
+    return bool(JEKO_API_KEY and JEKO_API_KEY_ID and JEKO_WEBHOOK_SECRET and PUBLIC_APP_URL)
+
+
+def _jeko_call(method, path, body=None, timeout=20):
+    """Appel authentifié à l'API Jèko. Retourne (status_http, json)."""
+    req = urllib.request.Request(
+        f"{JEKO_API_BASE}{path}",
+        data=json.dumps(body).encode("utf-8") if body is not None else None,
+        method=method,
+        headers={"X-API-KEY": JEKO_API_KEY, "X-API-KEY-ID": JEKO_API_KEY_ID, "Content-Type": "application/json", "Accept": "application/json"},
+    )
+    try:
+        with urllib.request.urlopen(req, timeout=timeout) as resp:
+            return resp.status, json.loads(resp.read().decode() or "{}")
+    except urllib.error.HTTPError as e:
+        try:
+            return e.code, json.loads(e.read().decode() or "{}")
+        except Exception:
+            return e.code, {}
+
+
+_jeko_store_cache = {"id": JEKO_STORE_ID}
+
+
+def _jeko_store_id():
+    """JEKO_STORE_ID, sinon le premier magasin du compte (GET /partner_api/stores)."""
+    if _jeko_store_cache["id"]:
+        return _jeko_store_cache["id"]
+    code, res = _jeko_call("GET", "/partner_api/stores")
+    stores = res if isinstance(res, list) else (res.get("data") or res.get("stores") or res.get("items") or [])
+    if code == 200 and stores:
+        _jeko_store_cache["id"] = str(stores[0].get("id") or "")
+    return _jeko_store_cache["id"]
+
+
+def _find_jeko_order(data, reference=None, request_id=None):
+    for o in data.get("orders", []):
+        if o.get("payment_method") != "jeko":
+            continue
+        if (reference and o.get("jeko_reference") == reference) or (request_id and o.get("jeko_payment_request_id") == request_id):
+            return o
+    return None
+
+
+def _jeko_amount_matches(order, amount):
+    """Le montant notifié doit correspondre au total (Jèko compte en centimes ; on tolère les deux unités)."""
+    try:
+        amount = int(round(float(amount)))
+    except (TypeError, ValueError):
+        return False
+    expected = int(order.get("totalXof") or 0)
+    return amount in (expected * 100, expected)
+
+
+def _mark_jeko_paid(order, transaction_id=None, amount=None):
+    """Passe la commande en payée (à appeler sous data_tx). Retourne True si l'état a changé."""
+    if order.get("payment_status") == "paid":
+        return False
+    if amount is not None and not _jeko_amount_matches(order, amount):
+        order["payment_status"] = "review"
+        order["payment_note"] = f"Montant Jèko reçu ({amount}) différent du total ({order.get('totalXof')} F) : à vérifier"
+        return True
+    order["payment_status"] = "paid"
+    order["paid_at"] = datetime.now().isoformat(timespec="seconds")
+    if transaction_id:
+        order["jeko_transaction_id"] = transaction_id
+    if order.get("status") == "pending":
+        order["status"] = "confirmed"
+    order.pop("payment_note", None)
+    return True
+
+
+def _after_jeko_update(order):
+    """Notifications hors verrou après un changement d'état de paiement."""
+    if order.get("payment_status") == "paid":
+        _notify_admin_new_order(order, payment=f"✅ PAYÉ — {_payment_label(order)}")
+        data = load_data()
+        filename, pdf_bytes = _get_invoice_pdf_for_order(data, order)
+        _send_telegram_document(pdf_bytes, filename, caption=f"🧾 Facture payée — {order['id']}")
+        if order.get("telegram_user_id"):
+            _send_telegram_to(order["telegram_user_id"], f"✅ Paiement reçu pour ta commande <b>{html.escape(order['id'])}</b> ({order.get('totalXof')} F). On lance l'impression !")
+    elif order.get("payment_status") == "review":
+        _send_telegram(f"⚠️ <b>Paiement Jèko à vérifier</b> — {html.escape(order['id'])}\n{html.escape(order.get('payment_note', ''))}")
+
+
+@app.route("/api/payments/config", methods=["GET"])
+def payments_config():
+    """Moyens de paiement disponibles (la webapp masque Jèko tant que les clés ne sont pas configurées)."""
+    return jsonify({
+        "jeko": {"enabled": _jeko_enabled(), "operators": [{"id": k, "label": v} for k, v in JEKO_OPERATORS.items()]},
+        "stars": {"enabled": bool(TELEGRAM_BOT_TOKEN)},
+    })
+
+
+@app.route("/api/payments/jeko", methods=["POST"])
+@limiter.limit("10 per minute")
+def create_jeko_payment():
+    """Crée la commande + une demande de paiement Jèko, et renvoie l'URL de paiement."""
+    if not _jeko_enabled():
+        return jsonify({"error": "Paiement Mobile Money indisponible pour le moment"}), 503
+    body = request.get_json(silent=True) or {}
+    operator = str(body.get("payment_method") or "").strip().lower()
+    if operator not in JEKO_OPERATORS:
+        return jsonify({"error": "Choisis un opérateur : " + ", ".join(JEKO_OPERATORS.values())}), 400
+    store_id = _jeko_store_id()
+    if not store_id:
+        return jsonify({"error": "Boutique Jèko introuvable (JEKO_STORE_ID)"}), 503
+
     data = load_data()
-    return jsonify(data["momo"])
+    items, err = _price_items(data, body.get("items"))
+    if err:
+        return jsonify({"error": err}), 400
+    total_xof = sum(i["xof"] * i["qty"] for i in items)
+    reference = f"SS-{int(time.time())}-{os.urandom(6).hex()}"
+    back = f"{PUBLIC_APP_URL}/#/orders?paiement=retour&ref={reference}"
+    code, res = _jeko_call("POST", "/partner_api/payment_requests", {
+        "storeId": store_id,
+        "amountCents": int(total_xof) * 100,
+        "currency": "XOF",
+        "reference": reference,
+        "paymentDetails": {"type": "redirect", "data": {
+            "paymentMethod": operator,
+            "successUrl": back,
+            "errorUrl": f"{PUBLIC_APP_URL}/#/cart?paiement=echec&ref={reference}",
+        }},
+    })
+    redirect_url = (res or {}).get("redirectUrl")
+    if code not in (200, 201) or not redirect_url:
+        app.logger.warning(f"Jèko payment_requests HTTP {code}: {str(res)[:300]}")
+        return jsonify({"error": "Jèko n'a pas pu créer le paiement. Réessaie dans un instant."}), 502
+
+    uid = _acting_user_id(body.get("telegram_user_id"))
+    extra = {
+        "telegram_user_id": _uid_value(uid) if uid else None,
+        "payment_method": "jeko",
+        "payment_operator": operator,
+        "payment_status": "awaiting",
+        "jeko_reference": reference,
+        "jeko_payment_request_id": res.get("id"),
+        **_client_fields(body),
+    }
+    with data_tx() as data:
+        items, err = _price_items(data, body.get("items"))
+        if err:
+            return jsonify({"error": err}), 400
+        order, _, _ = _append_order(data, items, extra)
+    return jsonify({"order": order, "redirect_url": redirect_url, "reference": reference}), 201
+
+
+@app.route("/api/payments/jeko/<reference>", methods=["GET"])
+def jeko_payment_status(reference):
+    """État du paiement (la référence aléatoire sert de jeton). Interroge Jèko si le webhook tarde."""
+    order = _find_jeko_order(load_data(), reference=reference)
+    if not order:
+        return jsonify({"error": "Paiement introuvable"}), 404
+    if order.get("payment_status") == "awaiting" and order.get("jeko_payment_request_id") and _jeko_enabled():
+        code, res = _jeko_call("GET", f"/partner_api/payment_requests/{order['jeko_payment_request_id']}", timeout=10)
+        remote = str((res or {}).get("status") or "").lower() if code == 200 else ""
+        if remote in ("success", "error"):
+            changed = False
+            with data_tx() as data:
+                o = _find_jeko_order(data, reference=reference)
+                if o and o.get("payment_status") == "awaiting":
+                    if remote == "success":
+                        changed = _mark_jeko_paid(o, amount=res.get("amountCents") or res.get("amount"))
+                    else:
+                        o["payment_status"] = "failed"
+                order = o or order
+            if changed:
+                _after_jeko_update(order)
+    return jsonify({"order_id": order["id"], "payment_status": order.get("payment_status"), "status": order.get("status"), "totalXof": order.get("totalXof")})
+
+
+@app.route("/api/webhooks/jeko", methods=["POST"])
+def jeko_webhook():
+    """Notification Jèko signée (Jeko-Signature = HMAC-SHA256 hex du corps brut avec le secret webhook)."""
+    raw = request.get_data(cache=False)
+    if not JEKO_WEBHOOK_SECRET:
+        return jsonify({"error": "Webhook non configuré"}), 503
+    expected = hmac.new(JEKO_WEBHOOK_SECRET.encode(), raw, hashlib.sha256).hexdigest()
+    received = (request.headers.get("Jeko-Signature") or "").strip().lower()
+    if not received or not hmac.compare_digest(expected, received):
+        return jsonify({"error": "Signature invalide"}), 401
+    event = (request.headers.get("Jeko-Event") or "").strip()
+    try:
+        tx = json.loads(raw.decode("utf-8") or "{}")
+    except ValueError:
+        return jsonify({"error": "JSON invalide"}), 400
+    event = event or str(tx.get("event") or "")
+    if event and event != "TRANSACTION_COMPLETED":
+        return jsonify({"ok": True, "ignored": event})
+    tx = tx.get("data") if isinstance(tx.get("data"), dict) else tx
+    details = tx.get("transactionDetails") or {}
+    status = str(tx.get("status") or "").lower()
+    changed, order = False, None
+    with data_tx() as data:
+        order = _find_jeko_order(data, reference=details.get("reference") or tx.get("reference"),
+                                 request_id=details.get("paymentRequestId") or tx.get("paymentRequestId"))
+        if not order:
+            app.logger.warning(f"Webhook Jèko sans commande associée (tx {tx.get('id')})")
+            return jsonify({"ok": True, "unknown": True})
+        if tx.get("id") and order.get("jeko_transaction_id") == tx.get("id"):
+            return jsonify({"ok": True, "duplicate": True})
+        if status == "success":
+            changed = _mark_jeko_paid(order, transaction_id=tx.get("id"), amount=tx.get("amount"))
+        elif status == "error" and order.get("payment_status") == "awaiting":
+            order["payment_status"] = "failed"
+            changed = False
+    if changed:
+        _after_jeko_update(order)
+    return jsonify({"ok": True})
 
 
 # ==================== Clients / sessions ====================
@@ -1552,6 +1775,8 @@ def health():
         warnings.append("flask-limiter non installé — rate limiting désactivé")
     if _cors_origins == ["*"]:
         warnings.append("ALLOWED_ORIGINS non défini — CORS ouvert à tous les domaines")
+    if not _jeko_enabled():
+        warnings.append("Jèko non configuré (JEKO_API_KEY, JEKO_API_KEY_ID, JEKO_WEBHOOK_SECRET, PUBLIC_APP_URL) — paiement Mobile Money masqué")
     return jsonify({
         "status": "ok",
         "service": "stickerstreet-api",

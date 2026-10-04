@@ -48,7 +48,7 @@ async function request(path, { method = "GET", body, form, errorLabel = "Erreur 
 
 export const fetchProducts = () => request("/products", { errorLabel: "Erreur chargement produits" });
 export const fetchBanners = () => request("/banners", { errorLabel: "Erreur chargement bannières" });
-export const fetchMomo = () => request("/momo", { errorLabel: "Erreur chargement paiements" });
+export const fetchPaymentConfig = () => request("/payments/config", { errorLabel: "Erreur chargement paiements" });
 export const fetchTonRate = (totalXof) => request(`/rates/ton?total_xof=${encodeURIComponent(totalXof)}`, { errorLabel: "Taux TON indisponible" });
 
 export function uploadBlobImage(file, folder = "uploads") {
@@ -90,6 +90,17 @@ export function createOrder(items, profile = null, payment = {}) {
     errorLabel: "Erreur création commande",
   });
 }
+
+/** Crée la commande + la demande de paiement Jèko ; renvoie { order, redirect_url, reference }. */
+export function createJekoPayment(items, operator, profile = null) {
+  return request("/payments/jeko", {
+    method: "POST",
+    body: { items: toOrderLines(items), payment_method: operator, ...clientFields(profile) },
+    errorLabel: "Erreur création du paiement",
+  });
+}
+
+export const fetchJekoStatus = (reference) => request(`/payments/jeko/${encodeURIComponent(reference)}`, { errorLabel: "Statut de paiement indisponible" });
 
 export function createInvoiceStars(items, profile = null) {
   return request("/invoice/stars", {

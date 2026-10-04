@@ -63,6 +63,21 @@ def api_post(path, data):
         return None
 
 
+def api_post_full(path, data):
+    """Comme api_post mais renvoie (ok, json) pour pouvoir afficher l'erreur de l'API."""
+    try:
+        headers = {"X-Admin-Key": ADMIN_API_KEY} if ADMIN_API_KEY else None
+        r = requests.post(f"{API_URL}{path}", json=data, headers=headers, timeout=25)
+        try:
+            body = r.json()
+        except ValueError:
+            body = {}
+        return r.ok, body
+    except Exception as e:
+        logger.error(f"API POST error: {e}")
+        return False, {}
+
+
 def api_patch(path, data):
     try:
         headers = {"X-Admin-Key": ADMIN_API_KEY} if ADMIN_API_KEY else None
@@ -258,47 +273,63 @@ async def order_start(update: Update, context: ContextTypes.DEFAULT_TYPE):
     await update.message.reply_text(text, parse_mode="Markdown", reply_markup=InlineKeyboardMarkup(keyboard))
 
 
+JEKO_OPERATORS = {"wave": "🌊 Wave", "orange": "🟠 Orange Money", "mtn": "🟡 MTN MoMo", "moov": "🔵 Moov Money", "djamo": "💳 Djamo"}
+
+
 async def order_confirm_callback(update: Update, context: ContextTypes.DEFAULT_TYPE):
+    """Validation du panier : choix de l'opérateur Mobile Money (paiement en ligne Jèko)."""
     q = update.callback_query
-    cart = context.user_data.get("cart", [])
-    if not cart:
+    if not context.user_data.get("cart"):
         await q.answer("Panier vide")
         return
+    cfg = api_get("/api/payments/config") or {}
+    if not (cfg.get("jeko") or {}).get("enabled"):
+        await q.edit_message_text(
+            "💳 Le paiement Mobile Money en ligne arrive très bientôt.\n\n"
+            "En attendant, ouvre l'app pour payer en Stars ⭐ :",
+            reply_markup=InlineKeyboardMarkup([[InlineKeyboardButton("📱 Ouvrir l'app", web_app=WebAppInfo(url=WEBAPP_URL))]]),
+        )
+        await q.answer()
+        return
+    total = sum(i["xof"] * i["qty"] for i in context.user_data["cart"])
+    ops = list(JEKO_OPERATORS.items())
+    keyboard = [[InlineKeyboardButton(label, callback_data=f"jpay_{op}") for op, label in ops[k:k + 2]] for k in range(0, len(ops), 2)]
+    keyboard.append([InlineKeyboardButton("↩️ Retour", callback_data="order_cancel_keep")])
+    await q.edit_message_text(
+        f"💳 *Paiement sécurisé Jèko*\n\nTotal : *{xof_fmt(total)}*\nChoisis ton moyen de paiement :",
+        parse_mode="Markdown",
+        reply_markup=InlineKeyboardMarkup(keyboard),
+    )
+    await q.answer()
 
-    items = [
-        {
-            "id": i["id"],
-            "name": i["name"],
-            "emoji": i.get("emoji", "📦"),
-            "qty": i["qty"],
-            "sz": i.get("sz", ""),
-            "price": i["price"],
-            "ton": i["ton"],
-            "xof": i["xof"],
-        }
-        for i in cart
-    ]
-    order = api_post("/api/orders", {
-        "items": items,
+
+async def jeko_pay_callback(update: Update, context: ContextTypes.DEFAULT_TYPE):
+    """Crée la commande + le lien de paiement Jèko pour l'opérateur choisi."""
+    q = update.callback_query
+    op = q.data.split("_", 1)[1]
+    cart = context.user_data.get("cart", [])
+    if not cart or op not in JEKO_OPERATORS:
+        await q.answer("Panier vide")
+        return
+    await q.answer("Création du paiement…")
+    ok, res = api_post_full("/api/payments/jeko", {
+        "items": [{"id": i["id"], "sz": i.get("sz", ""), "qty": i["qty"]} for i in cart],
+        "payment_method": op,
         "telegram_user_id": update.effective_user.id,
         "client_name": update.effective_user.full_name,
-        "payment_method": "momo",
     })
-    if order:
-        context.user_data["cart"] = []
-        momo = api_get("/api/momo") or []
-        momo_lines = "\n".join(f"• {op['name']} : {op.get('num', '—')}" for op in momo) if momo else "• Wave : 0709393959\n• Djamo : lien dans l'app"
-        await q.edit_message_text(
-            f"🎉 *Commande validée !*\n\n"
-            f"Numéro : *{order['id']}*\n"
-            f"Total : {xof_fmt(order.get('totalXof', 0))}\n\n"
-            f"Paiement (Mobile Money / Wave / Djamo) :\n{momo_lines}\n\n"
-            f"Envoie le montant puis contacte le support pour confirmation.",
-            parse_mode="Markdown",
-        )
-    else:
-        await q.edit_message_text("❌ Erreur lors de la création de la commande. Réessaie ou contacte le support.")
-    await q.answer()
+    if not ok or not res.get("redirect_url"):
+        await q.edit_message_text(f"❌ {res.get('error') or 'Paiement indisponible pour le moment.'} Réessaie avec /order.")
+        return
+    order = res["order"]
+    context.user_data["cart"] = []
+    await q.edit_message_text(
+        f"🧾 *Commande {order['id']}* — {xof_fmt(order.get('totalXof', 0))}\n\n"
+        f"Appuie sur le bouton pour payer avec {JEKO_OPERATORS[op]}.\n"
+        f"Tu recevras un message ici dès que le paiement est confirmé ✅",
+        parse_mode="Markdown",
+        reply_markup=InlineKeyboardMarkup([[InlineKeyboardButton(f"💳 Payer {xof_fmt(order.get('totalXof', 0))}", url=res["redirect_url"])]]),
+    )
 
 
 async def order_cancel_callback(update: Update, context: ContextTypes.DEFAULT_TYPE):
@@ -434,8 +465,6 @@ async def successful_payment(update: Update, context: ContextTypes.DEFAULT_TYPE)
         "telegram_payment_charge_id": payment.telegram_payment_charge_id,
     })
     if order:
-        momo = api_get("/api/momo") or []
-        momo_lines = "\n".join(f"• {op['name']} : {op.get('num', '—')}" for op in momo) if momo else "• Wave : 0709393959\n• Djamo : lien dans l'app"
         await update.message.reply_text(
             f"🎉 *Paiement Stars reçu !*\n\n"
             f"Commande *{order['id']}* créée.\n"
@@ -489,6 +518,11 @@ async def callback_handler(update: Update, context: ContextTypes.DEFAULT_TYPE):
         await order_confirm_callback(update, context)
     elif data == "order_cancel":
         await order_cancel_callback(update, context)
+    elif data == "order_cancel_keep":
+        await update.callback_query.edit_message_text("Panier conservé. Utilise /order quand tu es prêt.")
+        await update.callback_query.answer()
+    elif data.startswith("jpay_"):
+        await jeko_pay_callback(update, context)
     elif data.startswith("add_"):
         await add_to_cart_callback(update, context)
     elif data.startswith("prod_"):

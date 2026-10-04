@@ -1,8 +1,7 @@
 import { useEffect, useMemo, useState } from "react";
-import { XOF_FMT, STATUSES } from "../data/constants";
+import { XOF_FMT, STATUSES, PAY_LABELS, PAYMENT_STATUS } from "../data/constants";
 
 const CATS = ["stickers", "flyers", "cartes", "posters", "tshirts", "art", "photo"];
-const PAY_LABELS = { momo: "Mobile Money", wave: "Wave", djamo: "Djamo", ton: "TON", stars: "Stars" };
 const EMPTY_FORM = {
   name: "",
   cat: "stickers",
@@ -454,7 +453,7 @@ export default function AdminView({
             <div key={o.id} style={{ ...card, borderRadius: 18, padding: 16 }}>
               <div style={{ marginBottom: 12 }}>
                 <div style={{ fontWeight: 700, fontSize: 15 }}>{o.id}</div>
-                <div style={{ fontFamily: "'Inter',sans-serif", color: t.textMuted, fontSize: 12, marginTop: 2 }}>{o.date} · {o.items.length} article(s) · {XOF_FMT(o.totalXof || o.total * 600)} · {PAY_LABELS[o.payment_method] || o.payment_method || "—"}</div>
+                <div style={{ fontFamily: "'Inter',sans-serif", color: t.textMuted, fontSize: 12, marginTop: 2 }}>{o.date} · {o.items.length} article(s) · {XOF_FMT(o.totalXof || o.total * 600)} · {PAY_LABELS[o.payment_method] || o.payment_method || "—"}{o.payment_operator ? ` (${o.payment_operator})` : ""}{PAYMENT_STATUS[o.payment_status] ? <strong style={{ color: PAYMENT_STATUS[o.payment_status].color }}> · {PAYMENT_STATUS[o.payment_status].label}</strong> : null}</div>
                 <div style={{ fontFamily: "'Inter',sans-serif", color: t.textSec, fontSize: 13, marginTop: 8, lineHeight: 1.5 }}>
                   <div><strong style={{ color: t.text }}>{o.client_name || "Client"}</strong>{o.telegram_user_id ? ` · TG ${o.telegram_user_id}` : ""}</div>
                   {(o.client_phone || o.client_address) && <div>{[o.client_phone, o.client_address].filter(Boolean).join(" · ")}</div>}
