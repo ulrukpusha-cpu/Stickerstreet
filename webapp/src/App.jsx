@@ -5,7 +5,7 @@ import {
   fetchProducts, fetchBanners, uploadBlobImage, createProduct, patchProduct, removeProduct,
   createBanner, patchBanner, removeBanner, fetchOrders, fetchMyOrders, createOrder, updateOrderStatus,
   fetchChat, postChatMessage, authTelegramMiniapp, updateProfile,
-  fetchPaymentConfig, createJekoPayment, fetchJekoStatus,
+  fetchPaymentConfig, createJekoPayment, fetchJekoStatus, fetchSettings, updateSettings,
   getSessionToken, setSessionToken, getAdminKey, setAdminKey, checkAdmin,
 } from "./api";
 import { getPriceForSize } from "./utils/productPrice";
@@ -81,6 +81,7 @@ export default function App() {
   const [ci, setCi] = useState("");
   const [pay, setPay] = useState(isTgMiniApp ? "stars" : "jeko");
   const [jeko, setJeko] = useState({ enabled: false, operators: [] });
+  const [bannerSettings, setBannerSettings] = useState({ autoplay: true, interval: 4 });
   const [design, setDesign] = useState(null);
   const [notif, setNotif] = useState("");
   const [atab, setAtab] = useState("orders");
@@ -195,6 +196,7 @@ export default function App() {
   /* ---------- Données ---------- */
   useEffect(() => {
     fetchPaymentConfig().then((cfg) => setJeko(cfg?.jeko || { enabled: false, operators: [] })).catch(() => {});
+    fetchSettings().then((s) => s?.banners && setBannerSettings(s.banners)).catch(() => {});
   }, []);
 
   useEffect(() => {
@@ -607,6 +609,7 @@ export default function App() {
           <HomeView
             products={products}
             banners={banners}
+            bannerSettings={bannerSettings}
             filter={filter}
             setFilter={setFilter}
             favorites={favorites}
@@ -653,6 +656,12 @@ export default function App() {
               onDeleteBanner={handleDeleteBanner}
               onUploadImage={handleUploadImage}
               onLogout={logoutAdmin}
+              bannerSettings={bannerSettings}
+              onSaveBannerSettings={async (patch) => {
+                const res = await updateSettings({ banners: patch });
+                setBannerSettings(res.banners);
+                notify("Réglages des bannières enregistrés ✓");
+              }}
               adminVia={adminVia}
               notify={notify}
             />
@@ -660,6 +669,8 @@ export default function App() {
           {view === "profil" && (
             <ProfilView
               profile={profile}
+              banners={banners}
+              bannerSettings={bannerSettings}
               saveProfile={saveProfile}
               hasSession={hasSession}
               onSession={applySession}

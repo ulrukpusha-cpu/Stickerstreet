@@ -1,5 +1,6 @@
 import { useRef } from "react";
 import Icon from "./Icon";
+import BannerCarousel from "./BannerCarousel";
 import { XOF_FMT } from "../data/constants";
 
 const CATS = [
@@ -67,7 +68,7 @@ function SkeletonGrid() {
   );
 }
 
-export default function HomeView({ products, banners, filter, setFilter, favorites, toggleFavorite, addCart, openProduct, notify }) {
+export default function HomeView({ products, banners, bannerSettings, filter, setFilter, favorites, toggleFavorite, addCart, openProduct, notify }) {
   const catalogRef = useRef(null);
   const homeBanners = banners.filter((b) => (b.section || "home") === "home" && b.active && b.image);
   const catOrder = (p) => { const i = CATS.findIndex((c) => c.k === p.cat); return i < 0 ? CATS.length : i; };
@@ -97,18 +98,7 @@ export default function HomeView({ products, banners, filter, setFilter, favorit
       </div>
 
       {homeBanners.length > 0 && (
-        <div className="banners" aria-label="Promotions">
-          {homeBanners.map((b) => (
-            <button
-              key={b.id}
-              onClick={() => { if (b.link) window.open(b.link, "_blank", "noopener,noreferrer"); }}
-              style={{ cursor: b.link ? "pointer" : "default" }}
-              aria-label={b.title || "Bannière"}
-            >
-              <img src={b.image} alt={b.title || "Bannière"} loading="lazy" />
-            </button>
-          ))}
-        </div>
+        <BannerCarousel banners={homeBanners} autoplay={bannerSettings?.autoplay} interval={bannerSettings?.interval} />
       )}
 
       <div className="section-head" ref={catalogRef} style={{ scrollMarginTop: 80 }}>

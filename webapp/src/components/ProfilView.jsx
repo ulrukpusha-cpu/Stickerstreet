@@ -1,5 +1,6 @@
 import { useState, useCallback, useEffect, useRef } from "react";
 import Icon from "./Icon";
+import BannerCarousel from "./BannerCarousel";
 import { authTelegram } from "../api";
 
 const BOT_USERNAME = import.meta.env.VITE_TELEGRAM_BOT_USERNAME || "StickerStreetBot";
@@ -10,7 +11,7 @@ function initials(name) {
   return (parts[0][0] + (parts[1]?.[0] || "")).toUpperCase();
 }
 
-export default function ProfilView({ profile, saveProfile, hasSession, onSession, onLogout, isAdmin, canAdmin, openAdmin, dark, toggleTheme, go, notify }) {
+export default function ProfilView({ profile, banners = [], bannerSettings, saveProfile, hasSession, onSession, onLogout, isAdmin, canAdmin, openAdmin, dark, toggleTheme, go, notify }) {
   const [edit, setEdit] = useState(false);
   const [form, setForm] = useState({ name: profile.name || "", phone: profile.phone || "", address: profile.address || "" });
   const taps = useRef(0);
@@ -137,6 +138,10 @@ export default function ProfilView({ profile, saveProfile, hasSession, onSession
             </button>
           ))}
         </nav>
+
+        {banners.some((b) => b.section === "profile" && b.active && b.image) && (
+          <BannerCarousel banners={banners.filter((b) => b.section === "profile" && b.active && b.image)} autoplay={bannerSettings?.autoplay} interval={bannerSettings?.interval} label="Offres" />
+        )}
       </div>
     </div>
   );

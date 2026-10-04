@@ -48,6 +48,8 @@ async function request(path, { method = "GET", body, form, errorLabel = "Erreur 
 
 export const fetchProducts = () => request("/products", { errorLabel: "Erreur chargement produits" });
 export const fetchBanners = () => request("/banners", { errorLabel: "Erreur chargement bannières" });
+export const fetchSettings = () => request("/settings", { errorLabel: "Erreur chargement réglages" });
+export const updateSettings = (patch) => request("/settings", { method: "PATCH", body: patch, errorLabel: "Erreur enregistrement réglages" });
 export const fetchPaymentConfig = () => request("/payments/config", { errorLabel: "Erreur chargement paiements" });
 export const fetchTonRate = (totalXof) => request(`/rates/ton?total_xof=${encodeURIComponent(totalXof)}`, { errorLabel: "Taux TON indisponible" });
 

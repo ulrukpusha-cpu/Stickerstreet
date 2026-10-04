@@ -715,6 +715,40 @@ def _sanitize_banner_payload(body, existing=None):
     }, None
 
 
+DEFAULT_SETTINGS = {"banners": {"autoplay": True, "interval": 4}}
+
+
+def _settings(data):
+    saved = data.get("settings") or {}
+    return {"banners": {**DEFAULT_SETTINGS["banners"], **(saved.get("banners") or {})}}
+
+
+@app.route("/api/settings", methods=["GET"])
+def get_settings():
+    """Réglages publics d'affichage (lus par la webapp)."""
+    return jsonify(_settings(load_data()))
+
+
+@app.route("/api/settings", methods=["PATCH"])
+def update_settings():
+    auth_err = _require_admin_api_key()
+    if auth_err:
+        return auth_err
+    body = (request.get_json(silent=True) or {}).get("banners") or {}
+    with data_tx() as data:
+        current = _settings(data)["banners"]
+        if "autoplay" in body:
+            current["autoplay"] = bool(body["autoplay"])
+        if "interval" in body:
+            try:
+                current["interval"] = max(2, min(15, int(body["interval"])))
+            except (TypeError, ValueError):
+                return jsonify({"error": "Durée invalide (2 à 15 secondes)"}), 400
+        data.setdefault("settings", {})["banners"] = current
+        result = _settings(data)
+    return jsonify(result)
+
+
 @app.route("/api/banners", methods=["GET"])
 def get_banners():
     data = load_data()
@@ -1652,7 +1686,7 @@ def _session_response(user_id, name, username):
         "username": username,
         "client": client,
         "token": _issue_session(user_id),
-        "is_admin": str(user_id) in ADMIN_TELEGRAM_IDS,
+        "is_admin": _staff_role(user_id) in ("owner", "admin"),
     }), (201 if created else 200)
 
 

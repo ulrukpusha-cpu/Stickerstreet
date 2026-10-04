@@ -1,7 +1,17 @@
-import { useEffect, useMemo, useState } from "react";
+import { useEffect, useMemo, useRef, useState } from "react";
+import Icon from "./Icon";
 import { XOF_FMT, STATUSES, PAY_LABELS, PAYMENT_STATUS } from "../data/constants";
 
 const CATS = ["stickers", "flyers", "cartes", "posters", "tshirts", "art", "photo"];
+const CAT_LABELS = { stickers: "Stickers", flyers: "Flyers", cartes: "Cartes", posters: "Posters", tshirts: "T-shirts", art: "Art", photo: "Photo" };
+const XOF_PER_USD = 600;
+const USD_PER_TON = 6.25;
+const ORDER_FILTERS = [
+  { k: "todo", l: "À traiter", test: (o) => ["confirmed", "production"].includes(o.status) || (o.status === "pending" && !["awaiting", "failed"].includes(o.payment_status)) },
+  { k: "awaiting", l: "Paiement en attente", test: (o) => ["awaiting", "review"].includes(o.payment_status) },
+  { k: "done", l: "Terminées", test: (o) => ["shipped", "delivered"].includes(o.status) },
+  { k: "all", l: "Toutes", test: () => true },
+];
 const EMPTY_FORM = {
   name: "",
   cat: "stickers",
@@ -105,8 +115,17 @@ export default function AdminView({
   onUploadImage,
   onLogout,
   adminVia = "key",
+  bannerSettings = { autoplay: true, interval: 4 },
+  onSaveBannerSettings,
   notify,
 }) {
+  const [orderFilter, setOrderFilter] = useState("todo");
+  const [search, setSearch] = useState("");
+  const [showForm, setShowForm] = useState(false);
+  const [showBannerForm, setShowBannerForm] = useState(false);
+  const [bs, setBs] = useState(bannerSettings);
+  const formRef = useRef(null);
+  useEffect(() => setBs(bannerSettings), [bannerSettings]);
   const [catFilter, setCatFilter] = useState("all");
   const [editingId, setEditingId] = useState(null);
   const [form, setForm] = useState(EMPTY_FORM);
@@ -151,9 +170,9 @@ export default function AdminView({
   );
 
   const filteredProducts = useMemo(() => {
-    if (catFilter === "all") return prods;
-    return prods.filter((p) => p.cat === catFilter);
-  }, [prods, catFilter]);
+    const q = search.trim().toLowerCase();
+    return prods.filter((p) => (catFilter === "all" || p.cat === catFilter) && (!q || p.name.toLowerCase().includes(q)));
+  }, [prods, catFilter, search]);
 
   const visibleBanners = useMemo(() => banners || [], [banners]);
 
@@ -190,10 +209,12 @@ export default function AdminView({
       visuals: visuals.slice(0, 3),
     });
     setSizePrices(nextSizePrices);
-    notify?.("Mode modification activé");
+    setShowForm(true);
+    setTimeout(() => formRef.current?.scrollIntoView({ behavior: "smooth", block: "start" }), 50);
   };
 
   const resetForm = () => {
+    setShowForm(false);
     setEditingId(null);
     setForm(EMPTY_FORM);
     setSizePrices({});
@@ -251,21 +272,21 @@ export default function AdminView({
   const submitProduct = async () => {
     const visuals = form.visuals.map((x) => x.trim()).filter(Boolean);
     const sizes = parsedSizes;
+    const toUsd = (x) => Math.round((x / XOF_PER_USD) * 100) / 100;
+    const toTon = (x) => Math.round((x / XOF_PER_USD / USD_PER_TON) * 10000) / 10000;
     const pricesBySize = {};
     sizes.forEach((sz) => {
-      const row = sizePrices[sz] || {};
-      pricesBySize[sz] = {
-        xof: Number(row.xof || form.xof || 0),
-        price: Number(row.price || form.price || 0),
-        ton: Number(row.ton || form.ton || 0),
-      };
+      const xof = Number(sizePrices[sz]?.xof || form.xof || 0);
+      pricesBySize[sz] = { xof, price: toUsd(xof), ton: toTon(xof) };
     });
+    const xofs = Object.values(pricesBySize).map((v) => v.xof).filter((x) => x > 0);
+    const baseXof = xofs.length ? Math.min(...xofs) : Number(form.xof || 0);
     const payload = {
       name: form.name.trim(),
       cat: form.cat,
-      xof: Number(form.xof),
-      price: Number(form.price || 0),
-      ton: Number(form.ton || 0),
+      xof: baseXof,
+      price: toUsd(baseXof),
+      ton: toTon(baseXof),
       sizes,
       desc: form.desc.trim(),
       custom: Boolean(form.custom),
@@ -276,8 +297,9 @@ export default function AdminView({
       pricesBySize,
     };
 
-    if (!payload.name || !payload.desc || !payload.sizes.length || !payload.visuals.length || !payload.xof) {
-      notify?.("Remplis nom, description, tailles, prix XOF et au moins 1 visuel");
+    if (!payload.name || !payload.desc || !payload.sizes.length || !payload.visuals.length || !payload.xof
+        || Object.values(pricesBySize).some((v) => !(v.xof > 0))) {
+      notify?.("Remplis nom, description, tailles, un prix pour chaque taille et au moins 1 visuel");
       return;
     }
     if (!allowUnsafeProductImages) {
@@ -313,6 +335,7 @@ export default function AdminView({
   };
 
   const startBannerEdit = (b) => {
+    setShowBannerForm(true);
     setEditingBannerId(b.id);
     setBannerForm({
       title: b.title || "",
@@ -325,6 +348,7 @@ export default function AdminView({
   };
 
   const resetBannerForm = () => {
+    setShowBannerForm(false);
     setEditingBannerId(null);
     setBannerForm(EMPTY_BANNER_FORM);
   };
@@ -424,240 +448,249 @@ export default function AdminView({
     }));
   };
 
+  const shownOrders = orders.filter((ORDER_FILTERS.find((f) => f.k === orderFilter) || ORDER_FILTERS[3]).test);
+  const awaitingCount = orders.filter(ORDER_FILTERS[1].test).length;
+  const todoCount = orders.filter(ORDER_FILTERS[0].test).length;
+  const TABS = [
+    { k: "orders", l: "Commandes", icon: "package" },
+    { k: "products", l: "Produits", icon: "shop" },
+    { k: "banners", l: "Bannières", icon: "image" },
+    { k: "settings", l: "Réglages", icon: "settings" },
+  ];
+
   return (
-    <div style={{ animation: "fadeUp 0.3s ease" }}>
-      <h2 style={title}>Panel admin</h2>
-      <div style={{ display: "grid", gridTemplateColumns: "1fr 1fr", gap: 10, marginBottom: 20 }}>
-        {[
-          { v: XOF_FMT(rev), l: "Revenus", c: "#F59E0B" },
-          { v: orders.length, l: "Commandes", c: "#3B82F6" },
-          { v: pend, l: "En attente", c: "#FF3B5C" },
-          { v: prods.length, l: "Produits", c: "#00C48C" },
-        ].map((s, i) => (
-          <div key={i} style={{ ...card, borderRadius: 18, padding: "18px 16px", textAlign: "center" }}>
-            <div style={{ fontSize: 26, fontWeight: 800, color: s.c }}>{s.v}</div>
-            <div style={{ fontFamily: "'Inter',sans-serif", fontSize: 11, color: t.textMuted, fontWeight: 500, letterSpacing: 1, textTransform: "uppercase", marginTop: 4 }}>{s.l}</div>
-          </div>
+    <div className="admin">
+      <h1 className="page-title">Panel admin <small>{adminVia === "telegram" ? "via Telegram" : "clé admin"}</small></h1>
+
+      <div className="stats">
+        <div className="stat"><b className="num" style={{ color: "var(--ok)" }}>{XOF_FMT(rev)}</b><span>Chiffre (toutes commandes)</span></div>
+        <div className="stat"><b className="num" style={{ color: "var(--brand)" }}>{todoCount}</b><span>À traiter</span></div>
+        <div className="stat"><b className="num" style={{ color: "var(--warn)" }}>{awaitingCount}</b><span>Paiements en attente</span></div>
+        <div className="stat"><b className="num">{prods.length}</b><span>Produits</span></div>
+      </div>
+
+      <div className="admin-tabs" role="tablist">
+        {TABS.map((x) => (
+          <button key={x.k} role="tab" aria-selected={tab === x.k} className={tab === x.k ? "is-active" : ""} onClick={() => setTab(x.k)}>
+            <Icon name={x.icon} size={17} /><span>{x.l}</span>
+          </button>
         ))}
       </div>
 
-      <div style={{ display: "flex", marginBottom: 18, background: t.segBg, borderRadius: 16, padding: 4 }}>
-        <button onClick={() => setTab("orders")} style={segBtn(tab === "orders")}>Commandes</button>
-        <button onClick={() => setTab("products")} style={segBtn(tab === "products")}>Produits</button>
-        <button onClick={() => setTab("settings")} style={segBtn(tab === "settings")}>Paramètres</button>
-      </div>
-
       {tab === "orders" && (
-        <div style={{ display: "flex", flexDirection: "column", gap: 12 }}>
-          {orders.map((o) => (
-            <div key={o.id} style={{ ...card, borderRadius: 18, padding: 16 }}>
-              <div style={{ marginBottom: 12 }}>
-                <div style={{ fontWeight: 700, fontSize: 15 }}>{o.id}</div>
-                <div style={{ fontFamily: "'Inter',sans-serif", color: t.textMuted, fontSize: 12, marginTop: 2 }}>{o.date} · {o.items.length} article(s) · {XOF_FMT(o.totalXof || o.total * 600)} · {PAY_LABELS[o.payment_method] || o.payment_method || "—"}{o.payment_operator ? ` (${o.payment_operator})` : ""}{PAYMENT_STATUS[o.payment_status] ? <strong style={{ color: PAYMENT_STATUS[o.payment_status].color }}> · {PAYMENT_STATUS[o.payment_status].label}</strong> : null}</div>
-                <div style={{ fontFamily: "'Inter',sans-serif", color: t.textSec, fontSize: 13, marginTop: 8, lineHeight: 1.5 }}>
-                  <div><strong style={{ color: t.text }}>{o.client_name || "Client"}</strong>{o.telegram_user_id ? ` · TG ${o.telegram_user_id}` : ""}</div>
-                  {(o.client_phone || o.client_address) && <div>{[o.client_phone, o.client_address].filter(Boolean).join(" · ")}</div>}
-                  <div style={{ color: t.textMuted, fontSize: 12 }}>{o.items.map((it) => `${it.name} (${it.sz || "—"}) ×${it.qty}`).join(", ")}</div>
+        <div className="stack">
+          <div className="chip-row">
+            {ORDER_FILTERS.map((f) => (
+              <button key={f.k} className={`chip${orderFilter === f.k ? " is-active" : ""}`} onClick={() => setOrderFilter(f.k)}>
+                {f.l} · {orders.filter(f.test).length}
+              </button>
+            ))}
+          </div>
+          {shownOrders.length === 0 && <div className="admin-empty">Aucune commande dans cette liste.</div>}
+          {shownOrders.map((o) => {
+            const st = STATUSES[o.status] || STATUSES.pending;
+            const pay = PAYMENT_STATUS[o.payment_status];
+            return (
+              <article key={o.id} className="card admin-order">
+                <div className="admin-order-head">
+                  <div>
+                    <b>{o.id}</b>
+                    <small>{o.date} · {PAY_LABELS[o.payment_method] || o.payment_method || "—"}{o.payment_operator ? ` (${o.payment_operator})` : ""}</small>
+                  </div>
+                  <span className="num admin-order-total">{XOF_FMT(o.totalXof || 0)}</span>
                 </div>
-                {o.payment_note && (
-                  <div style={{ marginTop: 8, padding: "8px 10px", borderRadius: 10, background: t.warn, border: `1px solid ${t.warnBorder}`, color: "#D97E06", fontSize: 12, fontWeight: 600 }}>⚠ {o.payment_note}</div>
-                )}
-              </div>
-              <label style={{ fontSize: 11, color: t.textMuted, fontWeight: 600, letterSpacing: 1, textTransform: "uppercase" }}>Statut :</label>
-              <div style={{ display: "flex", gap: 6, marginTop: 8, flexWrap: "wrap" }}>
-                {Object.entries(STATUSES).map(([k, v]) => (
-                  <button key={k} onClick={() => handleStatusChange(o.id, k)} style={{ padding: "7px 12px", borderRadius: 10, fontSize: 13, cursor: "pointer", fontFamily: "'Inter',sans-serif", fontWeight: 600, border: "none", background: o.status === k ? v.color + "22" : t.bgAlt, color: o.status === k ? v.color : t.textMuted, transition: "all 0.2s" }}>{v.icon} {v.label}</button>
-                ))}
-              </div>
-            </div>
-          ))}
-        </div>
-      )}
-
-      {tab === "settings" && (
-        <div style={{ ...card, borderRadius: 18, padding: 20 }}>
-          <h3 style={{ margin: "0 0 8px", fontSize: 16, fontWeight: 700 }}>Accès admin</h3>
-          <p style={{ fontFamily: "'Inter',sans-serif", fontSize: 13, color: t.textSec, margin: "0 0 16px", lineHeight: 1.55 }}>
-            {adminVia === "telegram"
-              ? "Connecté en tant qu'admin via ton compte Telegram (ADMIN_TELEGRAM_ID)."
-              : "Connecté avec la clé admin. Elle est gardée uniquement pour cet onglet et vérifiée par le serveur."}
-            <br />Pour changer la clé : modifie ADMIN_API_KEY dans api/.env et bot/.env, puis redémarre l'API et le bot.
-          </p>
-          <button onClick={() => onLogout?.()} style={{ width: "100%", padding: 14, borderRadius: 14, border: "none", background: t.bgAlt, color: t.text, fontWeight: 700, fontSize: 14, cursor: "pointer", fontFamily: "'Inter',sans-serif" }}>
-            Quitter le mode admin
-          </button>
+                <div className="admin-pills">
+                  <span className="status" style={{ background: `${st.color}1F`, color: st.color }}><i />{st.label}</span>
+                  {pay && <span className="status" style={{ background: `${pay.color}1F`, color: pay.color }}><i />{pay.label}</span>}
+                </div>
+                <div className="admin-client">
+                  <b>{o.client_name || "Client"}</b>{o.telegram_user_id ? <small> · TG {o.telegram_user_id}</small> : null}
+                  {(o.client_phone || o.client_address) && <div>{[o.client_phone, o.client_address].filter(Boolean).join(" · ")}</div>}
+                </div>
+                <ul className="admin-items">
+                  {o.items.map((it, j) => <li key={j}><span>{it.name} <small>· {it.sz || "—"}</small></span><span className="num">×{it.qty}</span></li>)}
+                </ul>
+                {o.payment_note && <div className="notice" style={{ marginBottom: 10 }}>⚠ {o.payment_note}</div>}
+                <div className="admin-status-row">
+                  {Object.entries(STATUSES).map(([k, v]) => (
+                    <button key={k} className={`chip${o.status === k ? " is-active" : ""}`} onClick={() => handleStatusChange(o.id, k)}>{v.label}</button>
+                  ))}
+                </div>
+              </article>
+            );
+          })}
         </div>
       )}
 
       {tab === "products" && (
-        <div style={{ display: "flex", flexDirection: "column", gap: 12 }}>
-          <div style={{ display: "flex", gap: 8, marginBottom: 4 }}>
-            <button onClick={() => setProdSubtab("catalog")} style={segBtn(prodSubtab === "catalog")}>Catalogue</button>
-            <button onClick={() => setProdSubtab("banners")} style={segBtn(prodSubtab === "banners")}>Bannières pub</button>
-          </div>
+        <div className="stack">
+          {!showForm && (
+            <button className="btn btn-primary btn-block" onClick={() => { setShowForm(true); setTimeout(() => formRef.current?.scrollIntoView({ behavior: "smooth" }), 50); }}>
+              <Icon name="plus" size={18} /> Nouvel article
+            </button>
+          )}
 
-          {prodSubtab === "catalog" && (
-            <>
-          <div style={{ ...card, borderRadius: 18, padding: 14 }}>
-            <div style={{ display: "flex", gap: 8, marginBottom: 12 }}>
-              {["all", ...CATS].map((c) => (
-                <button key={c} onClick={() => setCatFilter(c)} style={{ ...segBtn(catFilter === c), textTransform: c === "all" ? "none" : "capitalize" }}>
-                  {c === "all" ? "Toutes" : c}
-                </button>
-              ))}
-            </div>
-
-            <div style={{ display: "grid", gap: 8 }}>
-              <input value={form.name} onChange={(e) => setForm((p) => ({ ...p, name: e.target.value }))} placeholder="Nom de l'article" style={{ width: "100%", padding: "12px 14px", borderRadius: 10, border: `1px solid ${t.cardBorder}`, background: t.bgAlt, color: t.text }} />
-              <select value={form.cat} onChange={(e) => setForm((p) => ({ ...p, cat: e.target.value }))} style={{ width: "100%", padding: "12px 14px", borderRadius: 10, border: `1px solid ${t.cardBorder}`, background: t.bgAlt, color: t.text }}>
-                {CATS.map((c) => <option key={c} value={c}>{c}</option>)}
-              </select>
-              <input value={form.sizes} onChange={(e) => setForm((p) => ({ ...p, sizes: e.target.value }))} placeholder="Tailles (ex: A5, A4)" style={{ width: "100%", padding: "12px 14px", borderRadius: 10, border: `1px solid ${t.cardBorder}`, background: t.bgAlt, color: t.text }} />
-              <div style={{ display: "grid", gridTemplateColumns: "1fr 1fr 1fr", gap: 8 }}>
-                <input value={form.xof} onChange={(e) => setForm((p) => ({ ...p, xof: e.target.value }))} placeholder="Prix XOF" style={{ width: "100%", padding: "12px 10px", borderRadius: 10, border: `1px solid ${t.cardBorder}`, background: t.bgAlt, color: t.text }} />
-                <input value={form.price} onChange={(e) => setForm((p) => ({ ...p, price: e.target.value }))} placeholder="USD" style={{ width: "100%", padding: "12px 10px", borderRadius: 10, border: `1px solid ${t.cardBorder}`, background: t.bgAlt, color: t.text }} />
-                <input value={form.ton} onChange={(e) => setForm((p) => ({ ...p, ton: e.target.value }))} placeholder="TON" style={{ width: "100%", padding: "12px 10px", borderRadius: 10, border: `1px solid ${t.cardBorder}`, background: t.bgAlt, color: t.text }} />
+          {showForm && (
+            <section className="card admin-form" ref={formRef}>
+              <div className="admin-form-head">
+                <h2>{editingId ? "Modifier l'article" : "Nouvel article"}</h2>
+                <button className="icon-btn" onClick={resetForm} aria-label="Fermer"><Icon name="close" size={18} /></button>
               </div>
+              <label className="field"><span>Nom</span><input className="input" value={form.name} onChange={(e) => setForm((p) => ({ ...p, name: e.target.value }))} placeholder="Ex : Sticker Vinyle" /></label>
+              <div className="admin-grid-2">
+                <label className="field"><span>Catégorie</span>
+                  <select className="input" value={form.cat} onChange={(e) => setForm((p) => ({ ...p, cat: e.target.value }))}>
+                    {CATS.map((c) => <option key={c} value={c}>{CAT_LABELS[c]}</option>)}
+                  </select>
+                </label>
+                <label className="field"><span>Emoji</span><input className="input" value={form.emoji} onChange={(e) => setForm((p) => ({ ...p, emoji: e.target.value }))} /></label>
+              </div>
+              <label className="field"><span>Tailles / options (séparées par des virgules)</span><input className="input" value={form.sizes} onChange={(e) => setForm((p) => ({ ...p, sizes: e.target.value }))} placeholder="Ex : 5×5cm, 8×8cm, Lot 100 · 5×5cm" /></label>
               {parsedSizes.length > 0 && (
-                <div style={{ border: `1px solid ${t.cardBorder}`, borderRadius: 12, padding: 10, background: t.bgAlt }}>
-                  <div style={{ fontSize: 12, color: t.textMuted, marginBottom: 8 }}>Prix par taille</div>
-                  <div style={{ display: "grid", gap: 8 }}>
-                    {parsedSizes.map((sz) => (
-                      <div key={sz} style={{ display: "grid", gridTemplateColumns: "1.1fr 1fr 1fr 1fr", gap: 6, alignItems: "center" }}>
-                        <div style={{ fontSize: 12, fontWeight: 700 }}>{sz}</div>
-                        <input value={sizePrices[sz]?.xof ?? form.xof ?? ""} onChange={(e) => updateSizePrice(sz, "xof", e.target.value)} placeholder="XOF" style={{ width: "100%", padding: "8px 8px", borderRadius: 8, border: `1px solid ${t.cardBorder}`, background: t.card, color: t.text }} />
-                        <input value={sizePrices[sz]?.price ?? form.price ?? ""} onChange={(e) => updateSizePrice(sz, "price", e.target.value)} placeholder="USD" style={{ width: "100%", padding: "8px 8px", borderRadius: 8, border: `1px solid ${t.cardBorder}`, background: t.card, color: t.text }} />
-                        <input value={sizePrices[sz]?.ton ?? form.ton ?? ""} onChange={(e) => updateSizePrice(sz, "ton", e.target.value)} placeholder="TON" style={{ width: "100%", padding: "8px 8px", borderRadius: 8, border: `1px solid ${t.cardBorder}`, background: t.card, color: t.text }} />
-                      </div>
-                    ))}
-                  </div>
+                <div className="admin-prices">
+                  <span className="eyebrow">Prix en F CFA (USD et TON calculés automatiquement)</span>
+                  {parsedSizes.map((sz) => (
+                    <label key={sz} className="admin-price-row">
+                      <span>{sz}</span>
+                      <input className="input num" inputMode="numeric" value={sizePrices[sz]?.xof ?? form.xof ?? ""} onChange={(e) => updateSizePrice(sz, "xof", e.target.value.replace(/[^\d]/g, ""))} placeholder="Prix" />
+                    </label>
+                  ))}
                 </div>
               )}
-              <input value={form.emoji} onChange={(e) => setForm((p) => ({ ...p, emoji: e.target.value }))} placeholder="Emoji (ex: 📦)" style={{ width: "100%", padding: "12px 14px", borderRadius: 10, border: `1px solid ${t.cardBorder}`, background: t.bgAlt, color: t.text }} />
-              <input value={form.grad} onChange={(e) => setForm((p) => ({ ...p, grad: e.target.value }))} placeholder="Dégradé CSS (optionnel)" style={{ width: "100%", padding: "12px 14px", borderRadius: 10, border: `1px solid ${t.cardBorder}`, background: t.bgAlt, color: t.text }} />
-              <textarea value={form.desc} onChange={(e) => setForm((p) => ({ ...p, desc: e.target.value }))} placeholder="Description" rows={3} style={{ width: "100%", padding: "12px 14px", borderRadius: 10, border: `1px solid ${t.cardBorder}`, background: t.bgAlt, color: t.text, resize: "vertical" }} />
-              <div style={{ display: "grid", gap: 6 }}>
-                <div style={{ fontSize: 12, color: t.textMuted }}>Visuels (min 1, affichage carrousel sur 3)</div>
+              <label className="field"><span>Description</span><textarea className="input admin-textarea" value={form.desc} onChange={(e) => setForm((p) => ({ ...p, desc: e.target.value }))} rows={3} /></label>
+              <div className="field">
+                <span>Visuels (le premier est l'image principale)</span>
                 {[0, 1, 2].map((idx) => (
-                  <div key={idx} style={{ display: "grid", gridTemplateColumns: "1fr auto", gap: 8 }}>
-                    <input value={form.visuals[idx] || ""} onChange={(e) => onVisualChange(idx, e.target.value)} placeholder={`URL visuel ${idx + 1} ou upload`} style={{ width: "100%", padding: "10px 12px", borderRadius: 10, border: `1px solid ${t.cardBorder}`, background: t.bgAlt, color: t.text }} />
-                    <label style={{ display: "inline-flex", alignItems: "center", justifyContent: "center", padding: "0 10px", borderRadius: 10, border: `1px solid ${t.cardBorder}`, background: t.card, cursor: "pointer", fontSize: 12, fontWeight: 600 }}>
-                      {uploadingVisualIdx === idx ? "..." : "Upload"}
-                      <input
-                        type="file"
-                        accept="image/*"
-                        style={{ display: "none" }}
-                        onChange={(e) => handleVisualFileUpload(idx, e.target.files?.[0])}
-                      />
+                  <div key={idx} className="admin-visual">
+                    <div className="admin-thumb">{form.visuals[idx] ? <img src={form.visuals[idx]} alt="" /> : <Icon name="image" size={18} />}</div>
+                    <input className="input" value={form.visuals[idx] || ""} onChange={(e) => onVisualChange(idx, e.target.value)} placeholder={`Visuel ${idx + 1} : URL ou importer`} />
+                    <label className="btn btn-ghost btn-sm admin-upload">
+                      {uploadingVisualIdx === idx ? "…" : <Icon name="upload" size={16} />}
+                      <input type="file" accept="image/*" hidden onChange={(e) => handleVisualFileUpload(idx, e.target.files?.[0])} />
                     </label>
                   </div>
                 ))}
               </div>
-              <label style={{ display: "flex", alignItems: "center", gap: 8, fontSize: 13, color: t.textMuted }}>
-                <input type="checkbox" checked={allowUnsafeProductImages} onChange={(e) => setAllowUnsafeProductImages(e.target.checked)} />
-                Forcer images produits hors dimensions recommandées
-              </label>
-              <label style={{ display: "flex", alignItems: "center", gap: 8, fontSize: 13, color: t.textMuted }}>
-                <input type="checkbox" checked={form.custom} onChange={(e) => setForm((p) => ({ ...p, custom: e.target.checked }))} />
-                Produit personnalisable
-              </label>
-              <div style={{ display: "flex", gap: 8 }}>
-                <button disabled={saving} onClick={submitProduct} style={{ ...segBtn(true), opacity: saving ? 0.7 : 1 }}>
-                  {editingId ? "Enregistrer" : "Ajouter l'article"}
-                </button>
-                {editingId && (
-                  <button onClick={resetForm} style={segBtn(false)}>Annuler</button>
-                )}
+              <label className="admin-check"><input type="checkbox" checked={form.custom} onChange={(e) => setForm((p) => ({ ...p, custom: e.target.checked }))} /> Produit personnalisable (badge PERSO + envoi du design)</label>
+              <label className="admin-check"><input type="checkbox" checked={allowUnsafeProductImages} onChange={(e) => setAllowUnsafeProductImages(e.target.checked)} /> Accepter des images hors format recommandé ({PRODUCT_IMG_RULES.label})</label>
+              <div className="admin-actions">
+                <button className="btn btn-ghost" onClick={resetForm}>Annuler</button>
+                <button className="btn btn-primary" disabled={saving} onClick={submitProduct}>{saving ? "Enregistrement…" : editingId ? "Enregistrer" : "Ajouter l'article"}</button>
               </div>
-            </div>
-          </div>
-
-          {filteredProducts.map((p) => (
-            <div key={p.id} style={{ display: "flex", alignItems: "center", gap: 14, ...card, borderRadius: 18, padding: "14px 16px" }}>
-              <div style={{ width: 48, height: 48, borderRadius: 14, background: p.img ? "#f5f5f3" : p.grad, display: "flex", alignItems: "center", justifyContent: "center", fontSize: 24, flexShrink: 0, overflow: "hidden" }}>
-                {p.img ? <img src={p.img} alt={p.name} style={{ width: "100%", height: "100%", objectFit: "cover" }} /> : <span>{p.emoji}</span>}
-              </div>
-              <div style={{ flex: 1 }}>
-                <div style={{ fontWeight: 700, fontSize: 14 }}>{p.name}</div>
-                <div style={{ fontFamily: "'Inter',sans-serif", color: t.textMuted, fontSize: 12 }}>{p.cat} · {p.sizes?.join(", ") || ""}</div>
-                <div style={{ fontFamily: "'Inter',sans-serif", color: t.textMuted, fontSize: 11, marginTop: 3 }}>
-                  {Array.isArray(p.visuals) ? p.visuals.length : p.img ? 1 : 0} visuel(s)
-                </div>
-              </div>
-              <div style={{ textAlign: "right", display: "grid", gap: 6 }}>
-                <div style={{ fontWeight: 800, fontSize: 15 }}>{XOF_FMT(p.xof || 0)}</div>
-                <button onClick={() => startEdit(p)} style={{ padding: "6px 10px", borderRadius: 9, border: "none", cursor: "pointer", background: "#3B82F6", color: "#fff", fontSize: 12 }}>Modifier</button>
-                <button onClick={() => handleDelete(p.id)} style={{ padding: "6px 10px", borderRadius: 9, border: "none", cursor: "pointer", background: "#EF4444", color: "#fff", fontSize: 12 }}>Supprimer</button>
-              </div>
-            </div>
-          ))}
-            </>
+            </section>
           )}
 
-          {prodSubtab === "banners" && (
-            <>
-              <div style={{ ...card, borderRadius: 18, padding: 14, display: "grid", gap: 8 }}>
-                <input value={bannerForm.title} onChange={(e) => setBannerForm((p) => ({ ...p, title: e.target.value }))} placeholder="Titre bannière (optionnel)" style={{ width: "100%", padding: "12px 14px", borderRadius: 10, border: `1px solid ${t.cardBorder}`, background: t.bgAlt, color: t.text }} />
-                <div style={{ display: "grid", gridTemplateColumns: "1fr auto", gap: 8 }}>
-                  <input value={bannerForm.image} onChange={(e) => setBannerForm((p) => ({ ...p, image: e.target.value }))} placeholder="URL image bannière ou upload" style={{ width: "100%", padding: "12px 14px", borderRadius: 10, border: `1px solid ${t.cardBorder}`, background: t.bgAlt, color: t.text }} />
-                  <label style={{ display: "inline-flex", alignItems: "center", justifyContent: "center", padding: "0 10px", borderRadius: 10, border: `1px solid ${t.cardBorder}`, background: t.card, cursor: "pointer", fontSize: 12, fontWeight: 600 }}>
-                    {uploadingBanner ? "..." : "Upload"}
-                    <input
-                      type="file"
-                      accept="image/*"
-                      style={{ display: "none" }}
-                      onChange={(e) => handleBannerFileUpload(e.target.files?.[0])}
-                    />
+          <input className="input" type="search" value={search} onChange={(e) => setSearch(e.target.value)} placeholder="Rechercher un article…" aria-label="Rechercher un article" />
+          <div className="chip-row">
+            {["all", ...CATS].map((c) => (
+              <button key={c} className={`chip${catFilter === c ? " is-active" : ""}`} onClick={() => setCatFilter(c)}>
+                {c === "all" ? "Toutes" : CAT_LABELS[c]} · {c === "all" ? prods.length : prods.filter((p) => p.cat === c).length}
+              </button>
+            ))}
+          </div>
+          <div className="card list">
+            {filteredProducts.length === 0 && <div className="admin-empty">Aucun article.</div>}
+            {filteredProducts.map((p) => (
+              <div key={p.id} className="admin-prod">
+                <div className="admin-thumb lg" style={!p.img ? { background: p.grad } : undefined}>{p.img ? <img src={p.img} alt="" loading="lazy" /> : <span>{p.emoji}</span>}</div>
+                <div className="admin-prod-info">
+                  <b>{p.name}</b>
+                  <small>{CAT_LABELS[p.cat] || p.cat} · {p.sizes?.length || 0} option(s) · dès <span className="num">{XOF_FMT(p.xof || 0)}</span></small>
+                </div>
+                <button className="icon-btn" onClick={() => startEdit(p)} aria-label={`Modifier ${p.name}`}><Icon name="settings" size={17} /></button>
+                <button className="icon-btn admin-danger" onClick={() => handleDelete(p.id)} aria-label={`Supprimer ${p.name}`}><Icon name="close" size={17} /></button>
+              </div>
+            ))}
+          </div>
+        </div>
+      )}
+
+      {tab === "banners" && (
+        <div className="stack">
+          <section className="card admin-form">
+            <h2>Défilement</h2>
+            <label className="admin-switch">
+              <input type="checkbox" checked={!!bs.autoplay} onChange={(e) => setBs((p) => ({ ...p, autoplay: e.target.checked }))} />
+              <span><b>Défilement automatique</b><small>Les bannières passent toutes seules ; le client peut toujours glisser au doigt.</small></span>
+            </label>
+            <label className="field"><span>Durée d'affichage de chaque bannière</span>
+              <select className="input" value={bs.interval} disabled={!bs.autoplay} onChange={(e) => setBs((p) => ({ ...p, interval: Number(e.target.value) }))}>
+                {[3, 4, 5, 6, 8, 10].map((n) => <option key={n} value={n}>{n} secondes</option>)}
+              </select>
+            </label>
+            <button className="btn btn-ink btn-block" disabled={bs.autoplay === bannerSettings.autoplay && Number(bs.interval) === Number(bannerSettings.interval)}
+              onClick={() => onSaveBannerSettings?.({ autoplay: !!bs.autoplay, interval: Number(bs.interval) }).catch((e) => notify?.(e.message))}>
+              Enregistrer le défilement
+            </button>
+          </section>
+
+          {!showBannerForm && (
+            <button className="btn btn-primary btn-block" onClick={() => setShowBannerForm(true)}><Icon name="plus" size={18} /> Nouvelle bannière</button>
+          )}
+          {showBannerForm && (
+            <section className="card admin-form">
+              <div className="admin-form-head">
+                <h2>{editingBannerId ? "Modifier la bannière" : "Nouvelle bannière"}</h2>
+                <button className="icon-btn" onClick={resetBannerForm} aria-label="Fermer"><Icon name="close" size={18} /></button>
+              </div>
+              <label className="field"><span>Titre (optionnel)</span><input className="input" value={bannerForm.title} onChange={(e) => setBannerForm((p) => ({ ...p, title: e.target.value }))} /></label>
+              <div className="field">
+                <span>Image ({BANNER_IMG_RULES.label})</span>
+                <div className="admin-visual">
+                  <input className="input" value={bannerForm.image} onChange={(e) => setBannerForm((p) => ({ ...p, image: e.target.value }))} placeholder="URL ou importer" />
+                  <label className="btn btn-ghost btn-sm admin-upload">
+                    {uploadingBanner ? "…" : <Icon name="upload" size={16} />}
+                    <input type="file" accept="image/*" hidden onChange={(e) => handleBannerFileUpload(e.target.files?.[0])} />
                   </label>
                 </div>
-                <input value={bannerForm.link} onChange={(e) => setBannerForm((p) => ({ ...p, link: e.target.value }))} placeholder="Lien au clic (optionnel)" style={{ width: "100%", padding: "12px 14px", borderRadius: 10, border: `1px solid ${t.cardBorder}`, background: t.bgAlt, color: t.text }} />
-                <select value={bannerForm.section} onChange={(e) => setBannerForm((p) => ({ ...p, section: e.target.value }))} style={{ width: "100%", padding: "12px 14px", borderRadius: 10, border: `1px solid ${t.cardBorder}`, background: t.bgAlt, color: t.text }}>
-                  <option value="home">Accueil</option>
-                  <option value="profile">Profil</option>
-                </select>
-                {bannerForm.image && (
-                  <div style={{ width: "100%", borderRadius: 10, overflow: "hidden", background: t.bgAlt, border: `1px solid ${t.cardBorder}` }}>
-                    <img src={bannerForm.image} alt="Preview bannière" style={{ width: "100%", height: 110, objectFit: "cover", display: "block" }} />
-                  </div>
-                )}
-                <label style={{ display: "flex", alignItems: "center", gap: 8, fontSize: 13, color: t.textMuted }}>
-                  <input type="checkbox" checked={allowUnsafeBannerImages} onChange={(e) => setAllowUnsafeBannerImages(e.target.checked)} />
-                  Forcer bannière hors dimensions recommandées
-                </label>
-                <label style={{ display: "flex", alignItems: "center", gap: 8, fontSize: 13, color: t.textMuted }}>
-                  <input type="checkbox" checked={bannerForm.active} onChange={(e) => setBannerForm((p) => ({ ...p, active: e.target.checked }))} />
-                  Bannière active
-                </label>
-                <div style={{ display: "flex", gap: 8 }}>
-                  <button disabled={bannerSaving} onClick={submitBanner} style={{ ...segBtn(true), opacity: bannerSaving ? 0.7 : 1 }}>
-                    {editingBannerId ? "Enregistrer" : "Ajouter bannière"}
-                  </button>
-                  {editingBannerId && (
-                    <button onClick={resetBannerForm} style={segBtn(false)}>Annuler</button>
-                  )}
-                </div>
               </div>
-
-              {visibleBanners.map((b) => (
-                <div key={b.id} style={{ ...card, borderRadius: 18, padding: 12, display: "grid", gridTemplateColumns: "68px 1fr auto", gap: 12, alignItems: "center" }}>
-                  <div style={{ width: 68, height: 52, borderRadius: 8, overflow: "hidden", background: t.bgAlt }}>
-                    <img src={b.image} alt={b.title || "Bannière"} style={{ width: "100%", height: "100%", objectFit: "cover" }} />
-                  </div>
-                  <div>
-                    <div style={{ fontWeight: 700, fontSize: 14 }}>{b.title || "Bannière"}</div>
-                    <div style={{ fontFamily: "'Inter',sans-serif", color: t.textMuted, fontSize: 12 }}>
-                      {(b.section || "home") === "profile" ? "Profil" : "Accueil"} · {b.active ? "Active" : "Inactive"}
-                    </div>
-                  </div>
-                  <div style={{ display: "grid", gap: 6 }}>
-                    <button onClick={() => startBannerEdit(b)} style={{ padding: "6px 10px", borderRadius: 9, border: "none", cursor: "pointer", background: "#3B82F6", color: "#fff", fontSize: 12 }}>Modifier</button>
-                    <button onClick={() => handleDeleteBanner(b.id)} style={{ padding: "6px 10px", borderRadius: 9, border: "none", cursor: "pointer", background: "#EF4444", color: "#fff", fontSize: 12 }}>Supprimer</button>
-                  </div>
-                </div>
-              ))}
-            </>
+              {bannerForm.image && <img className="admin-banner-preview" src={bannerForm.image} alt="Aperçu" />}
+              <label className="field"><span>Lien au clic (optionnel)</span><input className="input" value={bannerForm.link} onChange={(e) => setBannerForm((p) => ({ ...p, link: e.target.value }))} placeholder="https://…" /></label>
+              <label className="field"><span>Emplacement</span>
+                <select className="input" value={bannerForm.section} onChange={(e) => setBannerForm((p) => ({ ...p, section: e.target.value }))}>
+                  <option value="home">Page d'accueil</option>
+                  <option value="profile">Page profil</option>
+                </select>
+              </label>
+              <label className="admin-check"><input type="checkbox" checked={bannerForm.active} onChange={(e) => setBannerForm((p) => ({ ...p, active: e.target.checked }))} /> Bannière visible</label>
+              <label className="admin-check"><input type="checkbox" checked={allowUnsafeBannerImages} onChange={(e) => setAllowUnsafeBannerImages(e.target.checked)} /> Accepter une image hors format recommandé</label>
+              <div className="admin-actions">
+                <button className="btn btn-ghost" onClick={resetBannerForm}>Annuler</button>
+                <button className="btn btn-primary" disabled={bannerSaving} onClick={submitBanner}>{bannerSaving ? "Enregistrement…" : editingBannerId ? "Enregistrer" : "Ajouter"}</button>
+              </div>
+            </section>
           )}
+
+          <div className="card list">
+            {visibleBanners.length === 0 && <div className="admin-empty">Aucune bannière.</div>}
+            {visibleBanners.map((b) => (
+              <div key={b.id} className="admin-prod">
+                <div className="admin-thumb wide"><img src={b.image} alt="" loading="lazy" /></div>
+                <div className="admin-prod-info">
+                  <b>{b.title || "Bannière"}</b>
+                  <small>{(b.section || "home") === "profile" ? "Profil" : "Accueil"} · {b.active ? "Visible" : "Masquée"}</small>
+                </div>
+                <button className="icon-btn" onClick={() => startBannerEdit(b)} aria-label="Modifier la bannière"><Icon name="settings" size={17} /></button>
+                <button className="icon-btn admin-danger" onClick={() => handleDeleteBanner(b.id)} aria-label="Supprimer la bannière"><Icon name="close" size={17} /></button>
+              </div>
+            ))}
+          </div>
         </div>
+      )}
+
+      {tab === "settings" && (
+        <section className="card admin-form">
+          <h2>Accès admin</h2>
+          <p className="muted" style={{ margin: 0, fontSize: 13.5, lineHeight: 1.55 }}>
+            {adminVia === "telegram"
+              ? "Connecté avec ton compte Telegram (propriétaire ou admin de l'équipe)."
+              : "Connecté avec la clé admin : gardée uniquement pour cet onglet et vérifiée par le serveur."}
+          </p>
+          <p className="muted" style={{ margin: 0, fontSize: 13.5, lineHeight: 1.55 }}>
+            L'équipe (employés, admins) se gère dans le bot <b>StickerStreet Admin</b> → 👥 Équipe.
+          </p>
+          <button className="btn btn-ghost btn-block" onClick={() => onLogout?.()}><Icon name="logout" size={17} /> Quitter le mode admin</button>
+        </section>
       )}
     </div>
   );
