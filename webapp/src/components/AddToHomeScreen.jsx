@@ -8,6 +8,9 @@ export default function AddToHomeScreen({ theme }) {
   const [isIOS, setIsIOS] = useState(false);
 
   useEffect(() => {
+    // Mini App Telegram : pas de bannière PWA (cf. https://core.telegram.org/bots/webapps )
+    if (typeof window !== "undefined" && window.Telegram?.WebApp) return;
+
     // Déjà installé (mode standalone)
     const standalone = window.matchMedia("(display-mode: standalone)").matches
       || window.navigator.standalone === true;

@@ -1,227 +1,128 @@
-/** URL de l'API : VITE_API_URL en prod (VPS) pour pointer vers Railway, sinon /api (dev local) */
+/** URL de l'API : /api (même nginx que la webapp) ou VITE_API_URL. */
 const _apiBase = (import.meta.env.VITE_API_URL || "").trim().replace(/\/+$/, "");
 const API = _apiBase ? _apiBase : "/api";
-const ADMIN_API_KEY = (import.meta.env.VITE_ADMIN_API_KEY || "").trim();
 
-function adminHeaders(base = {}) {
-  return ADMIN_API_KEY ? { ...base, "X-Admin-Key": ADMIN_API_KEY } : base;
+/*
+ * Auth :
+ * - session client : jeton signé renvoyé par /auth/telegram-miniapp ou /auth/telegram (localStorage)
+ * - clé admin : saisie par l'admin dans l'app, gardée pour l'onglet uniquement (sessionStorage).
+ *   Elle n'est JAMAIS dans le bundle (les variables VITE_* sont publiques).
+ */
+const SESSION_KEY = "stickerstreet_session";
+const ADMIN_KEY = "stickerstreet_admin_key";
+
+function readStore(store, key) {
+  try { return store.getItem(key) || ""; } catch { return ""; }
+}
+function writeStore(store, key, value) {
+  try { value ? store.setItem(key, value) : store.removeItem(key); } catch { /* stockage indisponible */ }
 }
 
-export async function fetchProducts() {
-  const r = await fetch(`${API}/products`);
-  if (!r.ok) throw new Error("Erreur chargement produits");
+export const getSessionToken = () => readStore(localStorage, SESSION_KEY);
+export const setSessionToken = (token) => writeStore(localStorage, SESSION_KEY, token);
+export const getAdminKey = () => readStore(sessionStorage, ADMIN_KEY);
+export const setAdminKey = (key) => writeStore(sessionStorage, ADMIN_KEY, key);
+
+function headers(base = {}) {
+  const h = { ...base };
+  const token = getSessionToken();
+  if (token) h.Authorization = `Bearer ${token}`;
+  const adminKey = getAdminKey();
+  if (adminKey) h["X-Admin-Key"] = adminKey;
+  return h;
+}
+
+async function request(path, { method = "GET", body, form, errorLabel = "Erreur réseau" } = {}) {
+  const init = { method, headers: headers(body !== undefined ? { "Content-Type": "application/json" } : {}) };
+  if (body !== undefined) init.body = JSON.stringify(body);
+  if (form) init.body = form;
+  const r = await fetch(`${API}${path}`, init);
+  if (!r.ok) {
+    const err = await r.json().catch(() => ({}));
+    const e = new Error(err.error || `${errorLabel} (${r.status})`);
+    e.status = r.status;
+    throw e;
+  }
   return r.json();
 }
 
-export async function uploadBlobImage(file, folder = "uploads") {
+export const fetchProducts = () => request("/products", { errorLabel: "Erreur chargement produits" });
+export const fetchBanners = () => request("/banners", { errorLabel: "Erreur chargement bannières" });
+export const fetchMomo = () => request("/momo", { errorLabel: "Erreur chargement paiements" });
+export const fetchTonRate = (totalXof) => request(`/rates/ton?total_xof=${encodeURIComponent(totalXof)}`, { errorLabel: "Taux TON indisponible" });
+
+export function uploadBlobImage(file, folder = "uploads") {
   const fd = new FormData();
   fd.append("file", file);
   fd.append("folder", folder);
-  const r = await fetch(`${API}/upload/blob`, {
-    method: "POST",
-    headers: adminHeaders(),
-    body: fd,
-  });
-  if (!r.ok) {
-    const err = await r.json().catch(() => ({}));
-    throw new Error(err.error || `Erreur upload image (${r.status})`);
-  }
-  return r.json();
+  return request("/upload/blob", { method: "POST", form: fd, errorLabel: "Erreur upload image" });
 }
 
-export async function fetchBanners() {
-  const r = await fetch(`${API}/banners`);
-  if (!r.ok) throw new Error("Erreur chargement bannières");
-  return r.json();
-}
+export const createProduct = (product) => request("/products", { method: "POST", body: product, errorLabel: "Erreur ajout produit" });
+export const patchProduct = (id, patch) => request(`/products/${id}`, { method: "PATCH", body: patch, errorLabel: "Erreur modification produit" });
+export const removeProduct = (id) => request(`/products/${id}`, { method: "DELETE", errorLabel: "Erreur suppression produit" });
+export const createBanner = (payload) => request("/banners", { method: "POST", body: payload, errorLabel: "Erreur ajout bannière" });
+export const patchBanner = (id, payload) => request(`/banners/${id}`, { method: "PATCH", body: payload, errorLabel: "Erreur modification bannière" });
+export const removeBanner = (id) => request(`/banners/${id}`, { method: "DELETE", errorLabel: "Erreur suppression bannière" });
+export const updateOrderStatus = (orderId, status) => request(`/orders/${encodeURIComponent(orderId)}/status`, { method: "PATCH", body: { status }, errorLabel: "Erreur mise à jour statut" });
 
-export async function createProduct(product) {
-  const r = await fetch(`${API}/products`, {
-    method: "POST",
-    headers: adminHeaders({ "Content-Type": "application/json" }),
-    body: JSON.stringify(product),
-  });
-  if (!r.ok) {
-    const err = await r.json().catch(() => ({}));
-    throw new Error(err.error || `Erreur ajout produit (${r.status})`);
-  }
-  return r.json();
-}
+/** Admin : toutes les commandes. Client connecté : les siennes (filtrées côté serveur). */
+export const fetchOrders = () => request("/orders", { errorLabel: "Erreur chargement commandes" });
+/** Toujours les commandes du client connecté, même si une clé admin est active. */
+export const fetchMyOrders = () => request("/orders?mine=1", { errorLabel: "Erreur chargement commandes" });
+export const updateProfile = (fields) => request("/profile", { method: "PATCH", body: fields, errorLabel: "Erreur mise à jour profil" });
 
-export async function patchProduct(productId, patch) {
-  const r = await fetch(`${API}/products/${productId}`, {
-    method: "PATCH",
-    headers: adminHeaders({ "Content-Type": "application/json" }),
-    body: JSON.stringify(patch),
-  });
-  if (!r.ok) {
-    const err = await r.json().catch(() => ({}));
-    throw new Error(err.error || `Erreur modification produit (${r.status})`);
-  }
-  return r.json();
-}
+/** Seuls id / taille / quantité partent : le serveur recalcule noms et prix depuis le catalogue. */
+const toOrderLines = (items) => items.map((i) => ({ id: i.id, sz: i.sz, qty: i.qty }));
 
-export async function removeProduct(productId) {
-  const r = await fetch(`${API}/products/${productId}`, { method: "DELETE", headers: adminHeaders() });
-  if (!r.ok) {
-    const err = await r.json().catch(() => ({}));
-    throw new Error(err.error || `Erreur suppression produit (${r.status})`);
-  }
-  return r.json();
-}
-
-export async function createBanner(payload) {
-  const r = await fetch(`${API}/banners`, {
-    method: "POST",
-    headers: adminHeaders({ "Content-Type": "application/json" }),
-    body: JSON.stringify(payload),
-  });
-  if (!r.ok) {
-    const err = await r.json().catch(() => ({}));
-    throw new Error(err.error || `Erreur ajout bannière (${r.status})`);
-  }
-  return r.json();
-}
-
-export async function patchBanner(bannerId, payload) {
-  const r = await fetch(`${API}/banners/${bannerId}`, {
-    method: "PATCH",
-    headers: adminHeaders({ "Content-Type": "application/json" }),
-    body: JSON.stringify(payload),
-  });
-  if (!r.ok) {
-    const err = await r.json().catch(() => ({}));
-    throw new Error(err.error || `Erreur modification bannière (${r.status})`);
-  }
-  return r.json();
-}
-
-export async function removeBanner(bannerId) {
-  const r = await fetch(`${API}/banners/${bannerId}`, { method: "DELETE", headers: adminHeaders() });
-  if (!r.ok) {
-    const err = await r.json().catch(() => ({}));
-    throw new Error(err.error || `Erreur suppression bannière (${r.status})`);
-  }
-  return r.json();
-}
-
-export async function fetchOrders(telegramUserId = null) {
-  const url = telegramUserId ? `${API}/orders?telegram_user_id=${telegramUserId}` : `${API}/orders`;
-  const r = await fetch(url);
-  if (!r.ok) throw new Error("Erreur chargement commandes");
-  return r.json();
-}
-
-export async function createOrder(items, profile = null) {
-  const body = { items };
-  if (profile?.name) body.client_name = profile.name;
-  if (profile?.phone) body.client_phone = profile.phone;
-  if (profile?.address) body.client_address = profile.address;
-  if (profile?.telegram_user_id) body.telegram_user_id = profile.telegram_user_id;
-  const r = await fetch(`${API}/orders`, {
-    method: "POST",
-    headers: { "Content-Type": "application/json" },
-    body: JSON.stringify(body),
-  });
-  if (!r.ok) {
-    const err = await r.json().catch(() => ({}));
-    throw new Error(err.error || `Erreur création commande (${r.status})`);
-  }
-  return r.json();
-}
-
-export async function fetchChat() {
-  const r = await fetch(`${API}/chat`);
-  if (!r.ok) {
-    const err = await r.json().catch(() => ({}));
-    throw new Error(err.error || `Erreur chargement chat (${r.status})`);
-  }
-  return r.json();
-}
-
-export async function postChatMessage(text) {
-  const r = await fetch(`${API}/chat`, {
-    method: "POST",
-    headers: { "Content-Type": "application/json" },
-    body: JSON.stringify({ text }),
-  });
-  if (!r.ok) {
-    const err = await r.json().catch(() => ({}));
-    throw new Error(err.error || `Erreur envoi message (${r.status})`);
-  }
-  return r.json();
-}
-
-export async function authTelegram(user) {
-  const r = await fetch(`${API}/auth/telegram`, {
-    method: "POST",
-    headers: { "Content-Type": "application/json" },
-    body: JSON.stringify(user),
-  });
-  if (!r.ok) {
-    const err = await r.json().catch(() => ({}));
-    throw new Error(err.error || "Erreur authentification Telegram");
-  }
-  return r.json();
-}
-
-/** Connexion automatique (Mini App). initData ou, en secours, initDataUnsafeUser. */
-export async function authTelegramMiniapp(initData = null, initDataUnsafeUser = null) {
+function clientFields(profile) {
   const body = {};
-  if (initData && String(initData).trim()) body.init_data = initData;
-  if (initDataUnsafeUser && typeof initDataUnsafeUser === "object" && initDataUnsafeUser.id) body.init_data_unsafe_user = initDataUnsafeUser;
-  if (!body.init_data && !body.init_data_unsafe_user) throw new Error("Données Telegram manquantes");
-  const r = await fetch(`${API}/auth/telegram-miniapp`, {
-    method: "POST",
-    headers: { "Content-Type": "application/json" },
-    body: JSON.stringify(body),
-  });
-  if (!r.ok) {
-    const err = await r.json().catch(() => ({}));
-    throw new Error(err.error || "Erreur connexion Mini App");
-  }
-  return r.json();
-}
-
-export async function createInvoiceStars(items, totalXof, profile = null) {
-  const body = { items, total_xof: totalXof };
   if (profile?.name) body.client_name = profile.name;
   if (profile?.phone) body.client_phone = profile.phone;
   if (profile?.address) body.client_address = profile.address;
-  const r = await fetch(`${API}/invoice/stars`, {
+  return body;
+}
+
+export function createOrder(items, profile = null, payment = {}) {
+  return request("/orders", {
     method: "POST",
-    headers: { "Content-Type": "application/json" },
-    body: JSON.stringify(body),
+    body: { items: toOrderLines(items), ...clientFields(profile), ...payment },
+    errorLabel: "Erreur création commande",
   });
-  if (!r.ok) {
-    const err = await r.json().catch(() => ({}));
-    throw new Error(err.error || `Erreur création facture Stars (${r.status})`);
-  }
-  return r.json();
 }
 
-export async function fetchMomo() {
-  const r = await fetch(`${API}/momo`);
-  if (!r.ok) throw new Error("Erreur chargement paiements");
-  return r.json();
-}
-
-/** Récupère le taux TON (prix en USD) et le montant TON équivalent pour un total XOF. Cours en temps réel via CoinGecko. */
-export async function fetchTonRate(totalXof) {
-  const r = await fetch(`${API}/rates/ton?total_xof=${totalXof}`);
-  if (!r.ok) {
-    const err = await r.json().catch(() => ({}));
-    throw new Error(err.error || "Taux TON indisponible");
-  }
-  return r.json();
-}
-
-export async function updateOrderStatus(orderId, status) {
-  const r = await fetch(`${API}/orders/${orderId}/status`, {
-    method: "PATCH",
-    headers: adminHeaders({ "Content-Type": "application/json" }),
-    body: JSON.stringify({ status }),
+export function createInvoiceStars(items, profile = null) {
+  return request("/invoice/stars", {
+    method: "POST",
+    body: { items: toOrderLines(items), ...clientFields(profile) },
+    errorLabel: "Erreur création facture Stars",
   });
-  if (!r.ok) throw new Error("Erreur mise à jour statut");
-  return r.json();
+}
+
+export const fetchChat = () => request("/chat", { errorLabel: "Erreur chargement chat" });
+export const postChatMessage = (text) => request("/chat", { method: "POST", body: { text }, errorLabel: "Erreur envoi message" });
+
+async function openSession(path, body) {
+  const res = await request(path, { method: "POST", body, errorLabel: "Erreur connexion Telegram" });
+  if (res?.token) setSessionToken(res.token);
+  return res;
+}
+
+/** Login Widget Telegram (navigateur). */
+export const authTelegram = (user) => openSession("/auth/telegram", user);
+
+/** Connexion automatique (Mini App) : initData signé par Telegram, vérifié côté serveur. */
+export function authTelegramMiniapp(initData) {
+  if (!initData || !String(initData).trim()) return Promise.reject(new Error("Données Telegram manquantes"));
+  return openSession("/auth/telegram-miniapp", { init_data: initData });
+}
+
+/** Vérifie les droits admin (clé saisie ou session Telegram d'un admin). */
+export async function checkAdmin() {
+  try {
+    const res = await request("/admin/me");
+    return !!res?.admin;
+  } catch {
+    return false;
+  }
 }

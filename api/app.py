@@ -1,19 +1,38 @@
 """
 API Flask StickerStreet - Backend partagé entre la webapp et le bot Telegram
+
+Authentification :
+- Clients : jeton de session signé (Authorization: Bearer <token>) délivré par
+  /api/auth/telegram-miniapp (initData signé) ou /api/auth/telegram (Login Widget).
+- Admin : X-Admin-Key (bot / navigateur admin, jamais embarqué dans le bundle)
+  ou session d'un utilisateur Telegram listé dans ADMIN_TELEGRAM_ID.
 """
+import base64
+import fcntl
 import hashlib
 import hmac
+import html
 import json
 import os
 import re
+import tempfile
 import time
-import base64
-import urllib.request
-import urllib.parse
 import urllib.error
+import urllib.parse
+import urllib.request
+from contextlib import contextmanager
 from datetime import datetime
-from flask import Flask, jsonify, request
+
+from flask import Flask, abort, jsonify, request, send_file
 from flask_cors import CORS
+from itsdangerous import BadSignature, URLSafeTimedSerializer
+from werkzeug.exceptions import HTTPException
+from werkzeug.middleware.proxy_fix import ProxyFix
+
+try:
+    from .db import is_database_enabled, load_data as db_load_data, save_data as db_save_data
+except ImportError:
+    from db import is_database_enabled, load_data as db_load_data, save_data as db_save_data
 
 try:
     from flask_limiter import Limiter
@@ -23,6 +42,8 @@ except ImportError:
     _HAS_LIMITER = False
 
 app = Flask(__name__)
+# nginx (127.0.0.1) est le seul proxy devant l'API : on lui fait confiance pour l'IP client.
+app.wsgi_app = ProxyFix(app.wsgi_app, x_for=1, x_proto=1)
 
 _raw_origins = (os.environ.get("ALLOWED_ORIGINS", "") or "").strip()
 # Normaliser sans slash final pour matcher l'en-tête Origin envoyé par le navigateur
@@ -48,6 +69,7 @@ else:
     limiter = _FakeLimiter()
     app.logger.warning("flask-limiter non installé — rate limiting désactivé")
 
+
 @app.before_request
 def _csrf_origin_check():
     """Bloque les requêtes mutantes dont l'Origin ne fait pas partie des domaines autorisés."""
@@ -58,10 +80,19 @@ def _csrf_origin_check():
     origin = (request.headers.get("Origin") or "").strip().rstrip("/")
     if not origin:
         return None
-    allowed = [o.rstrip("/") for o in _cors_origins]
-    if origin in allowed:
+    if origin in _cors_origins:
+        return None
+    # Same-origin (webapp servie par le même nginx que l'API)
+    if origin == request.host_url.rstrip("/"):
         return None
     return jsonify({"error": "Origin non autorisée"}), 403
+
+
+@app.after_request
+def _security_headers(resp):
+    resp.headers.setdefault("X-Content-Type-Options", "nosniff")
+    resp.headers.setdefault("Referrer-Policy", "strict-origin-when-cross-origin")
+    return resp
 
 
 TELEGRAM_BOT_TOKEN = os.environ.get("TELEGRAM_BOT_TOKEN", "")
@@ -70,69 +101,200 @@ _admin_ids = os.environ.get("ADMIN_TELEGRAM_ID", "")
 ADMIN_TELEGRAM_IDS = [str(x).strip() for x in _admin_ids.split(",") if x.strip()]
 ADMIN_API_KEY = (os.environ.get("ADMIN_API_KEY", "") or "").strip().strip('"').strip("'")
 
-# Base de données : Neon (Postgres) si DATABASE_URL est défini, sinon fichier JSON
-USE_NEON = bool((os.environ.get("DATABASE_URL") or "").strip())
-if USE_NEON:
-    from db import load_data as _neon_load, save_data as _neon_save
-    def load_data():
-        return _neon_load()
-    def save_data(data):
-        return _neon_save(data)
-else:
-    # En local : ../shared/data.json | Sur Railway : data.json dans api/
-    _SHARED = os.path.join(os.path.dirname(__file__), "..", "shared", "data.json")
-    _LOCAL = os.path.join(os.path.dirname(__file__), "data.json")
-    # Priorité: DATA_FILE env (ex: volume persistant Railway), sinon api/data.json, sinon shared/data.json
-    DATA_FILE = (os.environ.get("DATA_FILE", "") or "").strip() or (_LOCAL if os.path.exists(_LOCAL) else _SHARED)
+# Secret de session : SESSION_SECRET, sinon dérivé du token bot (change si le token est révoqué).
+_session_secret = (os.environ.get("SESSION_SECRET", "") or "").strip()
+if not _session_secret and TELEGRAM_BOT_TOKEN:
+    _session_secret = hmac.new(TELEGRAM_BOT_TOKEN.encode(), b"stickerstreet-session", hashlib.sha256).hexdigest()
+SESSION_MAX_AGE = int(os.environ.get("SESSION_MAX_AGE", str(7 * 86400)) or 7 * 86400)
+_session_serializer = URLSafeTimedSerializer(_session_secret, salt="ss-session") if _session_secret else None
+
+# En local : ../shared/data.json | Sur Railway : data.json dans api/
+_SHARED = os.path.join(os.path.dirname(__file__), "..", "shared", "data.json")
+_LOCAL = os.path.join(os.path.dirname(__file__), "data.json")
+# Priorité: DATA_FILE env (ex: volume persistant Railway), sinon api/data.json, sinon shared/data.json
+DATA_FILE = (os.environ.get("DATA_FILE", "") or "").strip() or (_LOCAL if os.path.exists(_LOCAL) else _SHARED)
+_LOCK_FILE = os.path.join(os.path.dirname(os.path.abspath(DATA_FILE)), ".stickerstreet-data.lock")
 
 VERCEL_BLOB_UPLOAD_URL = os.environ.get("VERCEL_BLOB_UPLOAD_URL", "https://blob.vercel-storage.com").strip()
 VERCEL_BLOB_BASE_URL = os.environ.get("VERCEL_BLOB_BASE_URL", "").strip()
 BLOB_READ_WRITE_TOKEN = (os.environ.get("BLOB_READ_WRITE_TOKEN", "") or "").strip().strip('"').strip("'")
 PENDING_INVOICE_TTL_SECONDS = int(os.environ.get("PENDING_INVOICE_TTL_SECONDS", "86400") or "86400")
+_LOCAL_UPLOAD_DIR = (os.environ.get("LOCAL_UPLOAD_DIR", "") or "").strip()
+LOCAL_UPLOAD_ROOT = os.path.abspath(
+    _LOCAL_UPLOAD_DIR or os.path.join(os.path.dirname(__file__), "local_uploads")
+)
+_PUBLIC_UPLOAD_BASE = (os.environ.get("PUBLIC_BASE_URL", "") or "").strip().rstrip("/")
+
+MAX_ITEMS_PER_ORDER = 50
+MAX_QTY_PER_ITEM = 10000
+MAX_TEXT_LEN = 2000
+ORDER_PAYMENT_METHODS = {"momo", "wave", "djamo", "ton"}
+PRODUCT_CATEGORIES = {"stickers", "flyers", "cartes", "posters", "tshirts", "art", "photo"}
 
 
-if not USE_NEON:
-    def _ensure_data_file():
-        """Crée DATA_FILE si absent, en copiant un seed existant."""
-        if os.path.exists(DATA_FILE):
-            return
-        os.makedirs(os.path.dirname(DATA_FILE), exist_ok=True)
-        seed_path = _LOCAL if os.path.exists(_LOCAL) else _SHARED
-        if os.path.exists(seed_path):
-            with open(seed_path, "r", encoding="utf-8") as src:
-                seed = src.read()
-            with open(DATA_FILE, "w", encoding="utf-8") as dst:
-                dst.write(seed)
-        else:
-            # Seed minimal pour éviter crash démarrage.
-            with open(DATA_FILE, "w", encoding="utf-8") as dst:
-                json.dump(
-                    {
-                        "products": [],
-                        "orders": [],
-                        "statuses": {},
-                        "momo": [],
-                        "clients": [],
-                        "chat": [],
-                        "banners": [],
-                        "invoices": [],
-                        "pending_invoices": {},
-                    },
-                    dst,
-                    ensure_ascii=False,
-                    indent=2,
-                )
+def _default_data():
+    return {
+        "products": [],
+        "orders": [],
+        "statuses": {},
+        "momo": [],
+        "clients": [],
+        "chats": {},
+        "banners": [],
+        "invoices": [],
+        "pending_invoices": {},
+    }
 
-    def load_data():
-        _ensure_data_file()
-        with open(DATA_FILE, "r", encoding="utf-8") as f:
-            return json.load(f)
 
-    def save_data(data):
-        _ensure_data_file()
-        with open(DATA_FILE, "w", encoding="utf-8") as f:
+def _read_seed_data():
+    seed_path = _LOCAL if os.path.exists(_LOCAL) else _SHARED
+    if os.path.exists(seed_path):
+        with open(seed_path, "r", encoding="utf-8") as src:
+            return json.load(src)
+    return _default_data()
+
+
+def _ensure_data_file():
+    """Crée DATA_FILE si absent, en copiant un seed existant."""
+    if os.path.exists(DATA_FILE):
+        return
+    os.makedirs(os.path.dirname(DATA_FILE), exist_ok=True)
+    _write_file_atomic(_read_seed_data() or _default_data())
+
+
+def _write_file_atomic(data):
+    directory = os.path.dirname(os.path.abspath(DATA_FILE))
+    fd, tmp = tempfile.mkstemp(prefix=".data-", suffix=".json", dir=directory)
+    try:
+        with os.fdopen(fd, "w", encoding="utf-8") as f:
             json.dump(data, f, ensure_ascii=False, indent=2)
+        os.replace(tmp, DATA_FILE)
+    except Exception:
+        if os.path.exists(tmp):
+            os.remove(tmp)
+        raise
 
+
+def load_data():
+    # Pas de repli silencieux vers le fichier quand la base est configurée :
+    # lire Neon et écrire le fichier (ou l'inverse) désynchronise les données.
+    if is_database_enabled():
+        return db_load_data(_read_seed_data)
+    _ensure_data_file()
+    with open(DATA_FILE, "r", encoding="utf-8") as f:
+        return json.load(f)
+
+
+def save_data(data):
+    if is_database_enabled():
+        db_save_data(data)
+        return
+    _ensure_data_file()
+    _write_file_atomic(data)
+
+
+@contextmanager
+def data_tx():
+    """Lecture-modification-écriture sous verrou exclusif (partagé entre workers gunicorn)."""
+    with open(_LOCK_FILE, "a") as lock:
+        fcntl.flock(lock, fcntl.LOCK_EX)
+        try:
+            data = load_data()
+            yield data
+            save_data(data)
+        finally:
+            fcntl.flock(lock, fcntl.LOCK_UN)
+
+
+@app.errorhandler(Exception)
+def _unhandled(e):
+    if isinstance(e, HTTPException):
+        return e
+    app.logger.exception("Erreur non gérée")
+    return jsonify({"error": "Erreur serveur, réessaie dans un instant"}), 500
+
+
+# ==================== Authentification ====================
+
+def _issue_session(user_id):
+    if not _session_serializer:
+        return None
+    return _session_serializer.dumps({"uid": str(user_id)})
+
+
+def _session_user_id():
+    """ID Telegram (str) du porteur du jeton de session, ou None."""
+    if not _session_serializer:
+        return None
+    raw = (request.headers.get("Authorization") or "").strip()
+    if not raw.lower().startswith("bearer "):
+        return None
+    token = raw.split(" ", 1)[1].strip()
+    try:
+        payload = _session_serializer.loads(token, max_age=SESSION_MAX_AGE)
+    except BadSignature:
+        return None
+    uid = str((payload or {}).get("uid") or "").strip()
+    return uid or None
+
+
+def _has_admin_key():
+    if not ADMIN_API_KEY:
+        return False
+    incoming = (request.headers.get("X-Admin-Key") or "").strip()
+    return bool(incoming) and hmac.compare_digest(incoming, ADMIN_API_KEY)
+
+
+def _is_admin():
+    if _has_admin_key():
+        return True
+    uid = _session_user_id()
+    return bool(uid and uid in ADMIN_TELEGRAM_IDS)
+
+
+def _require_admin_api_key():
+    """Endpoints admin : clé admin ou session d'un admin Telegram. Refus par défaut."""
+    if _is_admin():
+        return None
+    return jsonify({"error": "Accès admin refusé"}), 401
+
+
+def _require_bot_key():
+    """Endpoints réservés au bot (serveur à serveur)."""
+    if _has_admin_key():
+        return None
+    return jsonify({"error": "Accès refusé"}), 401
+
+
+def _acting_user_id(body_uid=None):
+    """Utilisateur ciblé : session du client, ou telegram_user_id fourni par un appelant admin (bot)."""
+    uid = _session_user_id()
+    if uid:
+        if body_uid is not None and _is_admin():
+            return str(body_uid)
+        return uid
+    if body_uid is not None and _has_admin_key():
+        return str(body_uid)
+    return None
+
+
+def _same_user(a, b):
+    return a is not None and b is not None and str(a) == str(b)
+
+
+def _uid_value(uid):
+    """Stocke les IDs Telegram en int quand c'est possible (compat données existantes)."""
+    try:
+        return int(uid)
+    except (TypeError, ValueError):
+        return uid
+
+
+def _clip(value, limit=200):
+    return str(value or "").strip()[:limit]
+
+
+# ==================== Catalogue ====================
 
 @app.route("/api/products", methods=["GET"])
 def get_products():
@@ -159,26 +321,6 @@ def _sanitize_blob_folder(folder):
     return s or "uploads"
 
 
-def _require_admin_api_key():
-    """
-    Vérifie la clé admin pour les endpoints sensibles.
-    - Si ADMIN_API_KEY n'est pas configuré, la vérification est désactivée (compat).
-    - Sinon, il faut X-Admin-Key ou Authorization: Bearer <key>.
-    """
-    if not ADMIN_API_KEY:
-        return None
-    raw_auth = (request.headers.get("Authorization") or "").strip()
-    bearer = ""
-    if raw_auth.lower().startswith("bearer "):
-        parts = raw_auth.split(" ", 1)
-        bearer = parts[1].strip() if len(parts) > 1 else ""
-    header_key = (request.headers.get("X-Admin-Key") or "").strip()
-    incoming = header_key or bearer
-    if not incoming or not hmac.compare_digest(incoming, ADMIN_API_KEY):
-        return jsonify({"error": "Accès admin refusé"}), 401
-    return None
-
-
 def _is_blob_url(url):
     try:
         parsed = urllib.parse.urlparse((url or "").strip())
@@ -193,6 +335,36 @@ def _blob_pathname_from_url(url):
         return parsed.path.lstrip("/")
     except Exception:
         return ""
+
+
+def _is_local_upload_url(url):
+    try:
+        return "/api/uploads/" in urllib.parse.urlparse((url or "").strip()).path
+    except Exception:
+        return False
+
+
+def _local_relpath_from_url(url):
+    try:
+        p = urllib.parse.urlparse((url or "").strip())
+        marker = "/api/uploads/"
+        idx = p.path.find(marker)
+        if idx < 0:
+            return None
+        rest = p.path[idx + len(marker) :].lstrip("/")
+        if not rest or ".." in rest:
+            return None
+        return rest.replace("\\", "/")
+    except Exception:
+        return None
+
+
+def _safe_join_local_upload(relpath):
+    root = LOCAL_UPLOAD_ROOT
+    path = os.path.abspath(os.path.join(root, (relpath or "").replace("\\", "/")))
+    if path != root and not path.startswith(root + os.sep):
+        return None
+    return path
 
 
 def _delete_blob_url(url):
@@ -216,14 +388,37 @@ def _delete_blob_url(url):
         return False
 
 
+def _delete_local_upload_url(url):
+    rel = _local_relpath_from_url(url)
+    if not rel:
+        return False
+    path = _safe_join_local_upload(rel)
+    if not path or not os.path.isfile(path):
+        return False
+    try:
+        os.remove(path)
+        return True
+    except Exception as e:
+        app.logger.warning(f"Local upload delete failed for {url}: {e}")
+        return False
+
+
+def _delete_stored_image_url(url):
+    if _is_blob_url(url):
+        return _delete_blob_url(url)
+    if _is_local_upload_url(url):
+        return _delete_local_upload_url(url)
+    return False
+
+
 def _collect_product_blob_urls(product):
     urls = []
     if isinstance(product, dict):
         for v in (product.get("visuals") or []):
-            if isinstance(v, str) and _is_blob_url(v):
+            if isinstance(v, str) and (_is_blob_url(v) or _is_local_upload_url(v)):
                 urls.append(v.strip())
         img = product.get("img")
-        if isinstance(img, str) and _is_blob_url(img):
+        if isinstance(img, str) and (_is_blob_url(img) or _is_local_upload_url(img)):
             urls.append(img.strip())
     seen = set()
     out = []
@@ -265,54 +460,104 @@ def _upload_bytes_to_blob(blob, folder, original_name, content_type):
     return {"url": url, "pathname": pathname}
 
 
-@limiter.limit("15 per minute")
+def _upload_public_base():
+    # URL relative par défaut : fonctionne quel que soit l'hôte (nginx :3006, ngrok, localhost).
+    return _PUBLIC_UPLOAD_BASE
+
+
+# Types d'image acceptés : détectés sur le contenu, jamais sur le nom/type envoyés par le client.
+_IMAGE_MIME_BY_EXT = {".png": "image/png", ".jpg": "image/jpeg", ".jpeg": "image/jpeg", ".gif": "image/gif", ".webp": "image/webp"}
+
+
+def _sniff_image(blob):
+    """Retourne (extension, mime) si le contenu est une image PNG/JPEG/GIF/WebP, sinon (None, None)."""
+    if blob.startswith(b"\x89PNG\r\n\x1a\n"):
+        return ".png", "image/png"
+    if blob.startswith(b"\xff\xd8\xff"):
+        return ".jpg", "image/jpeg"
+    if blob[:6] in (b"GIF87a", b"GIF89a"):
+        return ".gif", "image/gif"
+    if blob[:4] == b"RIFF" and blob[8:12] == b"WEBP":
+        return ".webp", "image/webp"
+    return None, None
+
+
+def _save_bytes_local(blob, folder, ext):
+    """Enregistre l'image sur disque si Vercel Blob n'est pas configuré."""
+    folder = _sanitize_blob_folder(folder)
+    key = hashlib.md5(blob).hexdigest()[:10]
+    fname = f"{int(time.time() * 1000)}_{key}{ext}"
+    relpath = f"{folder}/{fname}".replace("\\", "/")
+    dest_dir = os.path.join(LOCAL_UPLOAD_ROOT, folder)
+    os.makedirs(dest_dir, exist_ok=True)
+    dest = os.path.join(dest_dir, fname)
+    with open(dest, "wb") as f:
+        f.write(blob)
+    base = _upload_public_base()
+    url = f"{base}/api/uploads/{relpath}"
+    return {"url": url, "pathname": relpath}
+
+
 @app.route("/api/upload/blob", methods=["POST"])
+@limiter.limit("15 per minute")
 def upload_blob_file():
-    """Upload un fichier image vers Vercel Blob et retourne l'URL publique."""
+    """Upload image : Vercel Blob si token configuré, sinon stockage local + URL /api/uploads/…"""
     auth_err = _require_admin_api_key()
     if auth_err:
         return auth_err
-    if not BLOB_READ_WRITE_TOKEN:
-        return jsonify({"error": "BLOB_READ_WRITE_TOKEN manquant"}), 500
 
     file = request.files.get("file")
     if not file:
         return jsonify({"error": "Fichier requis"}), 400
-
-    content_type = (file.content_type or "").strip().lower()
-    if not content_type.startswith("image/"):
-        return jsonify({"error": "Seules les images sont autorisées"}), 400
 
     blob = file.read()
     if not blob:
         return jsonify({"error": "Fichier vide"}), 400
     if len(blob) > 8 * 1024 * 1024:
         return jsonify({"error": "Image trop lourde (max 8MB)"}), 400
+    ext, mime = _sniff_image(blob)
+    if not ext:
+        return jsonify({"error": "Seules les images PNG, JPEG, GIF ou WebP sont autorisées"}), 400
+
+    folder = request.form.get("folder", "uploads")
 
     try:
-        uploaded = _upload_bytes_to_blob(
-            blob=blob,
-            folder=request.form.get("folder", "uploads"),
-            original_name=(file.filename or "image"),
-            content_type=content_type,
-        )
+        if BLOB_READ_WRITE_TOKEN:
+            uploaded = _upload_bytes_to_blob(blob=blob, folder=folder, original_name=f"image{ext}", content_type=mime)
+        else:
+            uploaded = _save_bytes_local(blob=blob, folder=folder, ext=ext)
         return jsonify(uploaded)
     except urllib.error.HTTPError as e:
-        try:
-            body = e.read().decode()
-        except Exception:
-            body = str(e)
-        return jsonify({"error": f"Upload Blob échoué ({e.code})", "details": body[:300]}), 502
+        app.logger.warning(f"Blob upload HTTP {e.code}")
+        return jsonify({"error": f"Upload Blob échoué ({e.code})"}), 502
     except Exception as e:
-        return jsonify({"error": "Upload Blob échoué", "details": str(e)}), 502
+        app.logger.warning(f"Upload failed: {e}")
+        label = "Upload Blob échoué" if BLOB_READ_WRITE_TOKEN else "Enregistrement local échoué"
+        return jsonify({"error": label}), 502
+
+
+@app.route("/api/uploads/<path:relpath>", methods=["GET"])
+def serve_local_upload(relpath):
+    """Sert les fichiers uploadés localement (sans Vercel Blob) — images uniquement."""
+    if ".." in relpath:
+        abort(404)
+    relpath = relpath.replace("\\", "/").lstrip("/")
+    mime = _IMAGE_MIME_BY_EXT.get(os.path.splitext(relpath)[1].lower())
+    if not mime:
+        abort(404)
+    path = _safe_join_local_upload(relpath)
+    if not path or not os.path.isfile(path):
+        abort(404)
+    resp = send_file(path, mimetype=mime, max_age=86400)
+    resp.headers["Content-Security-Policy"] = "default-src 'none'; img-src 'self'; style-src 'unsafe-inline'"
+    return resp
 
 
 def _sanitize_product_payload(body, existing=None):
     """Valide et nettoie un payload produit."""
     cat = (body.get("cat") or (existing or {}).get("cat") or "").strip().lower()
-    allowed_cats = {"stickers", "flyers", "cartes", "photo"}
-    if cat not in allowed_cats:
-        return None, "Catégorie invalide (stickers, flyers, cartes, photo)"
+    if cat not in PRODUCT_CATEGORIES:
+        return None, f"Catégorie invalide ({', '.join(sorted(PRODUCT_CATEGORIES))})"
 
     name = (body.get("name") if "name" in body else (existing or {}).get("name", "")).strip()
     if not name:
@@ -397,6 +642,8 @@ def _sanitize_product_payload(body, existing=None):
     for sz in sizes:
         if sz not in prices_by_size:
             prices_by_size[sz] = {"xof": xof, "price": round(price, 2), "ton": round(ton, 4)}
+    if any(v["xof"] <= 0 for v in prices_by_size.values()):
+        return None, "Prix XOF invalide pour une taille"
 
     cleaned = {
         "name": name,
@@ -427,6 +674,8 @@ def _sanitize_banner_payload(body, existing=None):
         return None, "Image bannière requise"
     if section not in {"home", "profile"}:
         return None, "Section bannière invalide (home/profile)"
+    if link and urllib.parse.urlparse(link).scheme not in ("http", "https"):
+        return None, "Lien bannière invalide (http/https uniquement)"
     return {
         "title": title or "Bannière",
         "image": image,
@@ -439,17 +688,7 @@ def _sanitize_banner_payload(body, existing=None):
 @app.route("/api/banners", methods=["GET"])
 def get_banners():
     data = load_data()
-    data.setdefault("banners", [])
-    normalized = []
-    changed = False
-    for b in data["banners"]:
-        if "section" not in b:
-            b["section"] = "home"
-            changed = True
-        normalized.append(b)
-    if changed:
-        save_data(data)
-    return jsonify(normalized)
+    return jsonify([{**b, "section": b.get("section", "home")} for b in data.get("banners", [])])
 
 
 @app.route("/api/banners", methods=["POST"])
@@ -457,16 +696,15 @@ def create_banner():
     auth_err = _require_admin_api_key()
     if auth_err:
         return auth_err
-    data = load_data()
-    data.setdefault("banners", [])
-    body = request.get_json() or {}
+    body = request.get_json(silent=True) or {}
     cleaned, err = _sanitize_banner_payload(body)
     if err:
         return jsonify({"error": err}), 400
-    nums = [int(b.get("id", 0)) for b in data["banners"] if str(b.get("id", "")).isdigit()]
-    cleaned["id"] = max(nums, default=0) + 1
-    data["banners"].append(cleaned)
-    save_data(data)
+    with data_tx() as data:
+        data.setdefault("banners", [])
+        nums = [int(b.get("id", 0)) for b in data["banners"] if str(b.get("id", "")).isdigit()]
+        cleaned["id"] = max(nums, default=0) + 1
+        data["banners"].append(cleaned)
     return jsonify(cleaned), 201
 
 
@@ -475,17 +713,16 @@ def update_banner(bid):
     auth_err = _require_admin_api_key()
     if auth_err:
         return auth_err
-    data = load_data()
-    data.setdefault("banners", [])
-    banner = next((b for b in data["banners"] if b.get("id") == bid), None)
-    if not banner:
-        return jsonify({"error": "Bannière introuvable"}), 404
-    body = request.get_json() or {}
-    cleaned, err = _sanitize_banner_payload(body, existing=banner)
-    if err:
-        return jsonify({"error": err}), 400
-    banner.update(cleaned)
-    save_data(data)
+    body = request.get_json(silent=True) or {}
+    with data_tx() as data:
+        data.setdefault("banners", [])
+        banner = next((b for b in data["banners"] if b.get("id") == bid), None)
+        if not banner:
+            return jsonify({"error": "Bannière introuvable"}), 404
+        cleaned, err = _sanitize_banner_payload(body, existing=banner)
+        if err:
+            return jsonify({"error": err}), 400
+        banner.update(cleaned)
     return jsonify(banner)
 
 
@@ -494,28 +731,20 @@ def delete_banner(bid):
     auth_err = _require_admin_api_key()
     if auth_err:
         return auth_err
-    data = load_data()
-    data.setdefault("banners", [])
-    target = next((b for b in data["banners"] if b.get("id") == bid), None)
-    if not target:
-        return jsonify({"error": "Bannière introuvable"}), 404
-    before = len(data["banners"])
-    data["banners"] = [b for b in data["banners"] if b.get("id") != bid]
-    if len(data["banners"]) == before:
-        return jsonify({"error": "Bannière introuvable"}), 404
+    with data_tx() as data:
+        data.setdefault("banners", [])
+        target = next((b for b in data["banners"] if b.get("id") == bid), None)
+        if not target:
+            return jsonify({"error": "Bannière introuvable"}), 404
+        data["banners"] = [b for b in data["banners"] if b.get("id") != bid]
 
-    banner_url = str((target or {}).get("image", "")).strip()
-    if _is_blob_url(banner_url):
-        still_used = any(str((b or {}).get("image", "")).strip() == banner_url for b in data["banners"])
-        if not still_used:
-            for p in data.get("products", []):
-                if banner_url in _collect_product_blob_urls(p):
-                    still_used = True
-                    break
-        if not still_used:
-            _delete_blob_url(banner_url)
-
-    save_data(data)
+        banner_url = str((target or {}).get("image", "")).strip()
+        if _is_blob_url(banner_url) or _is_local_upload_url(banner_url):
+            still_used = any(str((b or {}).get("image", "")).strip() == banner_url for b in data["banners"])
+            if not still_used:
+                still_used = any(banner_url in _collect_product_blob_urls(p) for p in data.get("products", []))
+            if not still_used:
+                _delete_stored_image_url(banner_url)
     return jsonify({"ok": True, "deleted_id": bid})
 
 
@@ -525,15 +754,14 @@ def create_product():
     auth_err = _require_admin_api_key()
     if auth_err:
         return auth_err
-    data = load_data()
-    body = request.get_json() or {}
+    body = request.get_json(silent=True) or {}
     cleaned, err = _sanitize_product_payload(body)
     if err:
         return jsonify({"error": err}), 400
-    nums = [int(p.get("id", 0)) for p in data["products"] if str(p.get("id", "")).isdigit()]
-    cleaned["id"] = max(nums, default=0) + 1
-    data["products"].append(cleaned)
-    save_data(data)
+    with data_tx() as data:
+        nums = [int(p.get("id", 0)) for p in data["products"] if str(p.get("id", "")).isdigit()]
+        cleaned["id"] = max(nums, default=0) + 1
+        data["products"].append(cleaned)
     return jsonify(cleaned), 201
 
 
@@ -543,16 +771,15 @@ def update_product(pid):
     auth_err = _require_admin_api_key()
     if auth_err:
         return auth_err
-    data = load_data()
-    product = next((x for x in data["products"] if x["id"] == pid), None)
-    if not product:
-        return jsonify({"error": "Produit introuvable"}), 404
-    body = request.get_json() or {}
-    cleaned, err = _sanitize_product_payload(body, existing=product)
-    if err:
-        return jsonify({"error": err}), 400
-    product.update(cleaned)
-    save_data(data)
+    body = request.get_json(silent=True) or {}
+    with data_tx() as data:
+        product = next((x for x in data["products"] if x["id"] == pid), None)
+        if not product:
+            return jsonify({"error": "Produit introuvable"}), 404
+        cleaned, err = _sanitize_product_payload(body, existing=product)
+        if err:
+            return jsonify({"error": err}), 400
+        product.update(cleaned)
     return jsonify(product)
 
 
@@ -562,101 +789,186 @@ def delete_product(pid):
     auth_err = _require_admin_api_key()
     if auth_err:
         return auth_err
-    data = load_data()
-    target = next((p for p in data["products"] if p.get("id") == pid), None)
-    if not target:
-        return jsonify({"error": "Produit introuvable"}), 404
-    before = len(data["products"])
-    data["products"] = [p for p in data["products"] if p.get("id") != pid]
-    if len(data["products"]) == before:
-        return jsonify({"error": "Produit introuvable"}), 404
+    with data_tx() as data:
+        target = next((p for p in data["products"] if p.get("id") == pid), None)
+        if not target:
+            return jsonify({"error": "Produit introuvable"}), 404
+        data["products"] = [p for p in data["products"] if p.get("id") != pid]
 
-    candidate_urls = _collect_product_blob_urls(target)
-    still_used = set()
-    for p in data["products"]:
-        for u in _collect_product_blob_urls(p):
-            still_used.add(u)
-    for b in data.get("banners", []):
-        bu = str((b or {}).get("image", "")).strip()
-        if _is_blob_url(bu):
-            still_used.add(bu)
-    for u in candidate_urls:
-        if u not in still_used:
-            _delete_blob_url(u)
-
-    save_data(data)
+        candidate_urls = _collect_product_blob_urls(target)
+        still_used = set()
+        for p in data["products"]:
+            still_used.update(_collect_product_blob_urls(p))
+        for b in data.get("banners", []):
+            bu = str((b or {}).get("image", "")).strip()
+            if _is_blob_url(bu) or _is_local_upload_url(bu):
+                still_used.add(bu)
+        for u in candidate_urls:
+            if u not in still_used:
+                _delete_stored_image_url(u)
     return jsonify({"ok": True, "deleted_id": pid})
 
 
-@app.route("/api/orders", methods=["GET"])
-def get_orders():
-    """Liste les commandes (optionnel: ?telegram_user_id=123)"""
-    data = load_data()
-    tg_id = request.args.get("telegram_user_id", type=int)
-    orders = data["orders"]
-    if tg_id is not None:
-        orders = [o for o in orders if o.get("telegram_user_id") == tg_id]
-    return jsonify(orders)
+# ==================== Commandes ====================
+
+def _norm_size(s):
+    return str(s or "").replace("×", "x").replace(" ", "").lower()[:20]
 
 
-@limiter.limit("20 per minute")
-@app.route("/api/orders", methods=["POST"])
-def create_order():
-    """Créer une commande (depuis webapp ou bot)"""
-    data = load_data()
-    _cleanup_expired_pending_invoices(data)
-    body = request.get_json() or {}
-    items = body.get("items", [])
-    if not items:
-        return jsonify({"error": "Items requis"}), 400
+def _price_items(data, raw_items):
+    """
+    Reconstruit les lignes de commande depuis le catalogue serveur.
+    Le client n'envoie que {id, sz, qty} : noms et prix envoyés par le client sont ignorés.
+    """
+    if not isinstance(raw_items, list) or not raw_items:
+        return None, "Items requis"
+    if len(raw_items) > MAX_ITEMS_PER_ORDER:
+        return None, f"Trop d'articles (max {MAX_ITEMS_PER_ORDER})"
+    catalog = {p.get("id"): p for p in data.get("products", [])}
+    out = []
+    for raw in raw_items:
+        if not isinstance(raw, dict):
+            return None, "Article invalide"
+        try:
+            pid = int(raw.get("id"))
+            qty = int(raw.get("qty", 1))
+        except (TypeError, ValueError):
+            return None, "Article invalide"
+        product = catalog.get(pid)
+        if not product:
+            return None, f"Produit {pid} introuvable"
+        if qty < 1 or qty > MAX_QTY_PER_ITEM:
+            return None, "Quantité invalide"
+        sizes = product.get("sizes") or []
+        wanted = raw.get("sz")
+        size = sizes[0] if sizes and not wanted else None
+        if wanted:
+            # Le bot remplace « × » par « x » dans ses callback_data
+            size = next((s for s in sizes if _norm_size(s) == _norm_size(wanted)), None)
+        if sizes and not size:
+            return None, f"Taille invalide pour {product.get('name')}"
+        unit = (product.get("pricesBySize") or {}).get(size) or {}
+        xof = int(unit.get("xof", product.get("xof", 0)) or 0)
+        if xof <= 0:
+            return None, f"Prix indisponible pour {product.get('name')}"
+        out.append({
+            "id": pid,
+            "name": product.get("name"),
+            "emoji": product.get("emoji", "📦"),
+            "img": product.get("img"),
+            "qty": qty,
+            "sz": size or "",
+            "price": round(float(unit.get("price", product.get("price", 0)) or 0), 2),
+            "ton": round(float(unit.get("ton", product.get("ton", 0)) or 0), 4),
+            "xof": xof,
+        })
+    return out, None
 
-    total = sum(float(i.get("price", 0)) * int(i.get("qty", 1)) for i in items)
-    total_xof = sum(float(i.get("xof", 0)) * int(i.get("qty", 1)) for i in items)
+
+def _client_fields(body):
+    return {
+        "client_name": _clip(body.get("client_name"), 120) or None,
+        "client_phone": _clip(body.get("client_phone"), 40) or None,
+        "client_address": _clip(body.get("client_address"), 300) or None,
+    }
+
+
+def _append_order(data, items, extra):
+    """Crée la commande + facture (à appeler sous data_tx). Retourne (order, invoice_filename, invoice_pdf)."""
     nums = [int(o["id"].split("-")[1]) for o in data["orders"] if "-" in o.get("id", "") and o["id"].split("-")[1].isdigit()]
-    order_id = f"ORD-{max(nums, default=1000) + 1}"
-    date = datetime.now().strftime("%Y-%m-%d")
-
     order = {
-        "id": order_id,
+        "id": f"ORD-{max(nums, default=1000) + 1}",
         "items": items,
-        "total": round(total, 2),
-        "totalXof": int(total_xof),
+        "total": round(sum(i["price"] * i["qty"] for i in items), 2),
+        "totalXof": int(sum(i["xof"] * i["qty"] for i in items)),
         "status": "pending",
-        "date": date,
-        "telegram_user_id": body.get("telegram_user_id"),
-        "client_name": body.get("client_name"),
-        "client_phone": body.get("client_phone"),
-        "client_address": body.get("client_address"),
+        "date": datetime.now().strftime("%Y-%m-%d"),
+        "created_at": datetime.now().isoformat(timespec="seconds"),
+        **extra,
     }
     data["orders"].insert(0, order)
     invoice_filename, invoice_pdf, invoice_number = _create_invoice_pdf_and_store(data, order)
     order["invoice_number"] = invoice_number
-    save_data(data)
+    return order, invoice_filename, invoice_pdf
 
-    # Alerte admin : nouvelle commande
-    _notify_admin_new_order(order, payment=order.get("payment_method") or "MoMo / TON")
-    _send_telegram_document(invoice_pdf, invoice_filename, caption=f"🧾 Facture {invoice_number} — {order.get('id')}")
 
+@app.route("/api/orders", methods=["GET"])
+def get_orders():
+    """Admin : toutes les commandes (filtre optionnel ?telegram_user_id=). Client : ses commandes."""
+    data = load_data()
+    orders = data["orders"]
+    if _is_admin() and request.args.get("mine") != "1":
+        tg_id = request.args.get("telegram_user_id")
+        if tg_id:
+            orders = [o for o in orders if _same_user(o.get("telegram_user_id"), tg_id)]
+        return jsonify(orders)
+    uid = _session_user_id()
+    if not uid:
+        return jsonify({"error": "Connexion Telegram requise"}), 401
+    return jsonify([o for o in orders if _same_user(o.get("telegram_user_id"), uid)])
+
+
+@app.route("/api/orders", methods=["POST"])
+@limiter.limit("20 per minute")
+def create_order():
+    """Créer une commande (webapp ou bot). Prix recalculés côté serveur."""
+    body = request.get_json(silent=True) or {}
+    payment = str(body.get("payment_method") or "momo").strip().lower()
+    if payment not in ORDER_PAYMENT_METHODS:
+        return jsonify({"error": "Moyen de paiement invalide (les Stars passent par /api/invoice/stars)"}), 400
+    uid = _acting_user_id(body.get("telegram_user_id"))
+    extra = {
+        "telegram_user_id": _uid_value(uid) if uid else None,
+        "payment_method": payment,
+        **_client_fields(body),
+    }
+    if payment == "ton":
+        extra["ton_tx_boc"] = _clip(body.get("ton_tx_boc"), 4096) or None
+        extra["payment_note"] = "Paiement TON à vérifier on-chain avant confirmation"
+    with data_tx() as data:
+        _cleanup_expired_pending_invoices(data)
+        items, err = _price_items(data, body.get("items"))
+        if err:
+            return jsonify({"error": err}), 400
+        order, invoice_filename, invoice_pdf = _append_order(data, items, extra)
+
+    _notify_admin_new_order(order, payment=_payment_label(order))
+    _send_telegram_document(invoice_pdf, invoice_filename, caption=f"🧾 Facture {order['invoice_number']} — {order['id']}")
     return jsonify(order), 201
+
+
+def _payment_label(order):
+    return {
+        "momo": "Mobile Money",
+        "wave": "Wave",
+        "djamo": "Djamo",
+        "ton": "TON (à vérifier)",
+        "stars": "Stars ★",
+    }.get(order.get("payment_method"), order.get("payment_method") or "—")
 
 
 def _notify_admin_new_order(order, payment=None):
     """Envoie une alerte aux admins Telegram pour une nouvelle commande."""
+    e = lambda v: html.escape(str(v if v not in (None, "") else "—"))
     items_txt = "\n".join(
-        f"• {i.get('emoji', '📦')} {i.get('name', '?')} × {i.get('qty', 1)} — {int(i.get('xof', 0) * int(i.get('qty', 1))):,} F".replace(",", " ")
+        f"• {e(i.get('emoji', '📦'))} {e(i.get('name', '?'))} ({e(i.get('sz'))}) × {int(i.get('qty', 1))} — "
+        + f"{int(i.get('xof', 0)) * int(i.get('qty', 1)):,} F".replace(",", " ")
         for i in order.get("items", [])
     )
     total_xof = order.get("totalXof") or 0
-    client = order.get("client_name") or order.get("client_phone") or "—"
-    pay_line = f"\n💳 Paiement : {payment}\n" if payment else "\n"
+    pay_line = f"\n💳 Paiement : {e(payment)}\n" if payment else "\n"
     msg = (
-        f"🔔 <b>Nouvelle commande {order.get('id', '')}</b>\n\n"
-        f"👤 {client}\n"
-        f"📞 {order.get('client_phone', '—')}\n"
-        f"📍 {order.get('client_address', '—')}{pay_line}\n"
+        f"🔔 <b>Nouvelle commande {e(order.get('id', ''))}</b>\n\n"
+        f"👤 {e(order.get('client_name'))}"
+        + (f" (TG {e(order.get('telegram_user_id'))})" if order.get("telegram_user_id") else "")
+        + "\n"
+        f"📞 {e(order.get('client_phone'))}\n"
+        f"📍 {e(order.get('client_address'))}{pay_line}\n"
         f"{items_txt}\n\n"
-        f"💰 Total : {total_xof:,} F".replace(",", " ")
+        + f"💰 Total : {total_xof:,} F".replace(",", " ")
     )
+    if order.get("payment_note"):
+        msg += f"\n⚠️ {e(order['payment_note'])}"
     _send_telegram(msg)
 
 
@@ -695,9 +1007,7 @@ def _build_simple_pdf(lines):
     return pdf
 
 
-def _create_invoice_pdf_and_store(data, order):
-    data.setdefault("invoices", [])
-    invoice_number = f"INV-{datetime.now().strftime('%Y%m%d')}-{len(data['invoices']) + 1:04d}"
+def _invoice_lines(order, invoice_number):
     lines = [
         "StickerStreet - Facture",
         f"Numero: {invoice_number}",
@@ -718,11 +1028,17 @@ def _create_invoice_pdf_and_store(data, order):
     lines += [
         "",
         f"Total: {int(order.get('totalXof', 0))} F CFA",
-        f"Paiement: {order.get('payment_method', 'MoMo / TON')}",
+        f"Paiement: {_payment_label(order)}",
         "",
         "Merci pour votre confiance.",
     ]
-    pdf_bytes = _build_simple_pdf(lines)
+    return lines
+
+
+def _create_invoice_pdf_and_store(data, order):
+    data.setdefault("invoices", [])
+    invoice_number = f"INV-{datetime.now().strftime('%Y%m%d')}-{len(data['invoices']) + 1:04d}"
+    pdf_bytes = _build_simple_pdf(_invoice_lines(order, invoice_number))
     filename = f"{invoice_number}_{order.get('id', 'order')}.pdf"
     invoice_entry = {
         "invoice_number": invoice_number,
@@ -733,17 +1049,21 @@ def _create_invoice_pdf_and_store(data, order):
         "client_name": order.get("client_name"),
     }
     # Migration: on privilégie le stockage fichier (Blob) plutôt que base64.
-    try:
-        uploaded = _upload_bytes_to_blob(
-            blob=pdf_bytes,
-            folder="invoices",
-            original_name=filename,
-            content_type="application/pdf",
-        )
+    uploaded = None
+    if BLOB_READ_WRITE_TOKEN:
+        try:
+            uploaded = _upload_bytes_to_blob(
+                blob=pdf_bytes,
+                folder="invoices",
+                original_name=filename,
+                content_type="application/pdf",
+            )
+        except Exception as e:
+            app.logger.warning(f"Invoice Blob upload failed: {e}")
+    if uploaded:
         invoice_entry["pdf_url"] = uploaded.get("url")
         invoice_entry["pdf_pathname"] = uploaded.get("pathname")
-    except Exception as e:
-        app.logger.warning(f"Invoice Blob upload failed: {e}")
+    else:
         invoice_entry["pdf_base64"] = base64.b64encode(pdf_bytes).decode("ascii")
     data["invoices"].insert(0, invoice_entry)
     return filename, pdf_bytes, invoice_number
@@ -752,37 +1072,13 @@ def _create_invoice_pdf_and_store(data, order):
 def _build_invoice_pdf_only(order, invoice_number=None):
     """Construit le PDF de facture sans l'enregistrer (pour renvoi à la validation)."""
     inv_num = invoice_number or order.get("invoice_number") or f"INV-VALID-{order.get('id', '')}"
-    lines = [
-        "StickerStreet - Facture",
-        f"Numero: {inv_num}",
-        f"Commande: {order.get('id', '-')}",
-        f"Date: {datetime.now().strftime('%Y-%m-%d %H:%M')}",
-        "",
-        f"Client: {order.get('client_name') or '-'}",
-        f"Tel: {order.get('client_phone') or '-'}",
-        f"Adresse: {order.get('client_address') or '-'}",
-        "",
-        "Articles:",
-    ]
-    for item in order.get("items", []):
-        qty = int(item.get("qty", 1))
-        line_total = int(float(item.get("xof", 0)) * qty)
-        size = item.get("sz") or "-"
-        lines.append(f"- {item.get('name', '?')} x{qty} ({size}) : {line_total} F")
-    lines += [
-        "",
-        f"Total: {int(order.get('totalXof', 0))} F CFA",
-        f"Paiement: {order.get('payment_method', 'MoMo / TON')}",
-        "",
-        "Merci pour votre confiance.",
-    ]
-    pdf_bytes = _build_simple_pdf(lines)
+    pdf_bytes = _build_simple_pdf(_invoice_lines(order, inv_num))
     filename = f"{inv_num}_{order.get('id', 'order')}.pdf"
     return filename, pdf_bytes
 
 
 def _get_invoice_pdf_for_order(data, order):
-    """Retourne (filename, pdf_bytes) pour une commande, ou (None, None) si indisponible."""
+    """Retourne (filename, pdf_bytes) pour une commande."""
     order_id = order.get("id")
     for inv in data.get("invoices", []):
         if inv.get("order_id") == order_id:
@@ -792,7 +1088,7 @@ def _get_invoice_pdf_for_order(data, order):
                     return (inv.get("filename") or f"invoice_{order_id}.pdf", pdf_bytes)
                 except Exception:
                     pass
-            if inv.get("pdf_url"):
+            if inv.get("pdf_url") and _is_blob_url(inv["pdf_url"]):
                 try:
                     with urllib.request.urlopen(inv["pdf_url"], timeout=10) as resp:
                         pdf_bytes = resp.read()
@@ -800,8 +1096,7 @@ def _get_invoice_pdf_for_order(data, order):
                 except Exception:
                     pass
             break
-    filename, pdf_bytes = _build_invoice_pdf_only(order)
-    return (filename, pdf_bytes)
+    return _build_invoice_pdf_only(order)
 
 
 def _multipart_build(fields, file_field, filename, file_bytes, content_type):
@@ -843,23 +1138,21 @@ def _send_telegram_document(file_bytes, filename, caption=""):
             )
             urllib.request.urlopen(req, timeout=15)
         except Exception as e:
-            app.logger.warning(f"Telegram sendDocument failed for {chat_id}: {e}")
+            app.logger.warning(f"Telegram sendDocument failed for {chat_id}: {type(e).__name__}")
 
 
 def _cleanup_expired_pending_invoices(data):
-    """Nettoie les factures Stars en attente expirées."""
+    """Nettoie les factures Stars en attente expirées (à appeler sous data_tx)."""
     data.setdefault("pending_invoices", {})
     now_ts = int(time.time())
     ttl = max(60, int(PENDING_INVOICE_TTL_SECONDS))
-    stale_ids = []
-    for inv_id, payload in data["pending_invoices"].items():
-        created_ts = int((payload or {}).get("created_at_ts") or 0)
-        if created_ts <= 0 or (now_ts - created_ts) > ttl:
-            stale_ids.append(inv_id)
+    stale_ids = [
+        inv_id for inv_id, payload in data["pending_invoices"].items()
+        if int((payload or {}).get("created_at_ts") or 0) <= 0
+        or (now_ts - int((payload or {}).get("created_at_ts") or 0)) > ttl
+    ]
     for inv_id in stale_ids:
         data["pending_invoices"].pop(inv_id, None)
-    if stale_ids:
-        save_data(data)
 
 
 @app.route("/api/orders/<order_id>/status", methods=["PATCH"])
@@ -868,25 +1161,24 @@ def update_order_status(order_id):
     auth_err = _require_admin_api_key()
     if auth_err:
         return auth_err
-    data = load_data()
-    body = request.get_json() or {}
+    body = request.get_json(silent=True) or {}
     status = body.get("status")
-    if status not in data.get("statuses", {}):
-        return jsonify({"error": "Statut invalide"}), 400
-
-    for o in data["orders"]:
-        if o["id"] == order_id:
-            o["status"] = status
-            save_data(data)
-            if status == "confirmed":
-                filename, pdf_bytes = _get_invoice_pdf_for_order(data, o)
-                if pdf_bytes:
-                    _send_telegram_document(
-                        pdf_bytes, filename,
-                        caption=f"✅ Facture validée — {o.get('id', '')}",
-                    )
-            return jsonify(o)
-    return jsonify({"error": "Commande introuvable"}), 404
+    with data_tx() as data:
+        if status not in data.get("statuses", {}):
+            return jsonify({"error": "Statut invalide"}), 400
+        order = next((o for o in data["orders"] if o["id"] == order_id), None)
+        if not order:
+            return jsonify({"error": "Commande introuvable"}), 404
+        order["status"] = status
+        order["updated_at"] = datetime.now().isoformat(timespec="seconds")
+        invoice = _get_invoice_pdf_for_order(data, order) if status == "confirmed" else None
+    if invoice:
+        filename, pdf_bytes = invoice
+        _send_telegram_document(pdf_bytes, filename, caption=f"✅ Facture validée — {order.get('id', '')}")
+    if order.get("telegram_user_id"):
+        st = (data.get("statuses") or {}).get(status) or {}
+        _send_telegram_to(order["telegram_user_id"], f"{st.get('icon', '📦')} Ta commande <b>{html.escape(order['id'])}</b> est maintenant : <b>{html.escape(st.get('label', status))}</b>")
+    return jsonify(order)
 
 
 @app.route("/api/statuses", methods=["GET"])
@@ -918,14 +1210,21 @@ STARS_PER_TON = _env_float("STARS_PER_TON", "95", 1)
 XOF_PER_STAR_FALLBACK = _env_float("XOF_PER_STAR_FALLBACK", "600", 1)  # F par Star (secours)
 TON_FALLBACK_USD = _env_float("TON_FALLBACK_USD", "7", 0.01)  # $ par TON (secours)
 
+_ton_cache = {"usd": 0.0, "ts": 0.0}
+
 
 def _fetch_ton_usd():
-    """Récupère le prix TON en USD via CoinGecko. Retourne 0 si échec."""
+    """Récupère le prix TON en USD via CoinGecko (cache 5 min). Retourne 0 si échec."""
+    if _ton_cache["usd"] > 0 and time.time() - _ton_cache["ts"] < 300:
+        return _ton_cache["usd"]
     try:
         url = "https://api.coingecko.com/api/v3/simple/price?ids=ton&vs_currencies=usd"
         with urllib.request.urlopen(url, timeout=5) as resp:
             data = json.loads(resp.read().decode())
-        return float(data.get("ton", {}).get("usd", 0))
+        v = float(data.get("ton", {}).get("usd", 0))
+        if v > 0:
+            _ton_cache.update(usd=v, ts=time.time())
+        return v
     except Exception:
         return 0
 
@@ -954,112 +1253,115 @@ def get_ton_rate():
     })
 
 
-@limiter.limit("10 per minute")
+def _xof_to_stars(total_xof):
+    total_stars = 0.0
+    ton_usd = _get_ton_usd()
+    if ton_usd > 0 and XOF_PER_USD > 0 and STARS_PER_TON > 0:
+        total_stars = (float(total_xof) / XOF_PER_USD) / ton_usd * STARS_PER_TON
+    if total_stars < 0.01 and XOF_PER_STAR_FALLBACK >= 1:
+        total_stars = float(total_xof) / XOF_PER_STAR_FALLBACK
+    return max(1, int(round(total_stars)))
+
+
 @app.route("/api/invoice/stars", methods=["POST"])
+@limiter.limit("10 per minute")
 def create_invoice_stars():
-    """Crée un lien de facture Telegram Stars. Conversion XOF → Stars alignée Fragment (via cours TON)."""
+    """Crée un lien de facture Telegram Stars. Montant calculé côté serveur depuis le catalogue."""
     if not TELEGRAM_BOT_TOKEN:
         return jsonify({"error": "Bot non configuré"}), 500
-    body = request.get_json() or {}
-    items = body.get("items", [])
-    total_xof = body.get("total_xof")
-    total_stars = 0
-    if total_xof is not None and total_xof > 0:
-        ton_usd = _get_ton_usd()
-        if ton_usd > 0 and XOF_PER_USD > 0 and STARS_PER_TON > 0:
-            amount_usd = float(total_xof) / XOF_PER_USD
-            amount_ton = amount_usd / ton_usd
-            total_stars = amount_ton * STARS_PER_TON
-        if total_stars < 0.01 and XOF_PER_STAR_FALLBACK >= 1:
-            total_stars = float(total_xof) / XOF_PER_STAR_FALLBACK
-    if total_stars < 0.01:
-        total_stars = body.get("total_stars") or sum(float(i.get("price", 0)) * int(i.get("qty", 1)) for i in items)
-    if total_stars < 0.01:
-        return jsonify({"error": "Montant invalide"}), 400
-    stars_int = max(1, int(round(total_stars)))
-    data = load_data()
-    _cleanup_expired_pending_invoices(data)
-    data.setdefault("pending_invoices", {})
-    inv_id = f"inv_{int(time.time() * 1000)}_{hashlib.md5(json.dumps(items).encode()).hexdigest()[:8]}"
-    data["pending_invoices"][inv_id] = {
-        "items": items,
-        "client_name": body.get("client_name"),
-        "client_phone": body.get("client_phone"),
-        "client_address": body.get("client_address"),
-        "created_at_ts": int(time.time()),
-    }
-    save_data(data)
+    uid = _session_user_id()
+    if not uid:
+        return jsonify({"error": "Ouvre l'app depuis Telegram pour payer en Stars"}), 401
+    body = request.get_json(silent=True) or {}
+    with data_tx() as data:
+        _cleanup_expired_pending_invoices(data)
+        items, err = _price_items(data, body.get("items"))
+        if err:
+            return jsonify({"error": err}), 400
+        total_xof = sum(i["xof"] * i["qty"] for i in items)
+        stars_int = _xof_to_stars(total_xof)
+        inv_id = f"inv_{int(time.time() * 1000)}_{os.urandom(6).hex()}"
+        data["pending_invoices"][inv_id] = {
+            "items": items,
+            "stars": stars_int,
+            "total_xof": total_xof,
+            "telegram_user_id": _uid_value(uid),
+            **_client_fields(body),
+            "created_at_ts": int(time.time()),
+        }
 
-    title = "StickerStreet — Commande"
-    description = f"{len(items)} article(s) — {stars_int} ★"
     api_payload = {
-        "title": title[:32],
-        "description": description[:255],
+        "title": "StickerStreet — Commande",
+        "description": f"{len(items)} article(s) — {total_xof:,} F".replace(",", " ")[:255],
         "payload": inv_id,
         "currency": "XTR",
         "prices": [{"label": "Stars", "amount": stars_int}],
     }
     try:
         url = f"https://api.telegram.org/bot{TELEGRAM_BOT_TOKEN}/createInvoiceLink"
-        req_data = json.dumps(api_payload).encode("utf-8")
-        req = urllib.request.Request(url, data=req_data, method="POST", headers={"Content-Type": "application/json"})
+        req = urllib.request.Request(url, data=json.dumps(api_payload).encode("utf-8"), method="POST", headers={"Content-Type": "application/json"})
         with urllib.request.urlopen(req, timeout=10) as resp:
             result = json.loads(resp.read().decode())
         if result.get("ok") and result.get("result"):
-            return jsonify({"url": result["result"]})
-        err_msg = result.get("description", "Erreur inconnue Telegram")
-        return jsonify({"error": err_msg}), 500
+            return jsonify({"url": result["result"], "stars": stars_int, "total_xof": total_xof})
+        return jsonify({"error": result.get("description", "Erreur inconnue Telegram")}), 502
     except urllib.error.HTTPError as e:
         try:
-            body = json.loads(e.read().decode())
-            err_msg = body.get("description", str(e))
+            err_msg = json.loads(e.read().decode()).get("description", "Erreur Telegram")
         except Exception:
-            err_msg = str(e)
-        return jsonify({"error": err_msg}), 500
+            err_msg = "Erreur Telegram"
+        return jsonify({"error": err_msg}), 502
     except Exception as e:
-        app.logger.warning(f"createInvoiceLink error: {e}")
-        return jsonify({"error": str(e) or "Impossible de créer la facture"}), 500
+        app.logger.warning(f"createInvoiceLink error: {type(e).__name__}")
+        return jsonify({"error": "Impossible de créer la facture"}), 502
 
 
-@limiter.limit("20 per minute")
+@app.route("/api/invoice/stars/<inv_id>", methods=["GET"])
+def get_pending_invoice(inv_id):
+    """Utilisé par le bot au pre_checkout pour vérifier la facture et son montant."""
+    auth_err = _require_bot_key()
+    if auth_err:
+        return auth_err
+    pending = (load_data().get("pending_invoices") or {}).get(inv_id)
+    if not pending:
+        return jsonify({"error": "Facture introuvable ou expirée"}), 404
+    return jsonify({"invoice_id": inv_id, "stars": pending.get("stars"), "telegram_user_id": pending.get("telegram_user_id")})
+
+
 @app.route("/api/orders/from-invoice", methods=["POST"])
+@limiter.limit("20 per minute")
 def create_order_from_invoice():
     """Crée une commande à partir d'un invoice_id (appelé par le bot après paiement Stars)."""
-    data = load_data()
-    _cleanup_expired_pending_invoices(data)
-    data.setdefault("pending_invoices", {})
-    body = request.get_json() or {}
+    auth_err = _require_bot_key()
+    if auth_err:
+        return auth_err
+    body = request.get_json(silent=True) or {}
     inv_id = body.get("invoice_id") or body.get("invoice_payload")
-    if not inv_id or inv_id not in data["pending_invoices"]:
-        return jsonify({"error": "Facture introuvable ou expirée"}), 404
-    pending = data["pending_invoices"].pop(inv_id)
-    save_data(data)
-    items = pending["items"]
-    total = sum(float(i.get("price", 0)) * int(i.get("qty", 1)) for i in items)
-    total_xof = sum(float(i.get("xof", 0)) * int(i.get("qty", 1)) for i in items)
-    nums = [int(o["id"].split("-")[1]) for o in data["orders"] if "-" in o.get("id", "") and o["id"].split("-")[1].isdigit()]
-    order_id = f"ORD-{max(nums, default=1000) + 1}"
-    order = {
-        "id": order_id,
-        "items": items,
-        "total": round(total, 2),
-        "totalXof": int(total_xof),
-        "status": "pending",
-        "date": datetime.now().strftime("%Y-%m-%d"),
-        "telegram_user_id": body.get("telegram_user_id"),
-        "client_name": pending.get("client_name"),
-        "client_phone": pending.get("client_phone"),
-        "client_address": pending.get("client_address"),
-        "payment_method": "stars",
-    }
-    data["orders"].insert(0, order)
-    invoice_filename, invoice_pdf, invoice_number = _create_invoice_pdf_and_store(data, order)
-    order["invoice_number"] = invoice_number
-    save_data(data)
+    paid = body.get("paid_stars")
+    with data_tx() as data:
+        _cleanup_expired_pending_invoices(data)
+        if not inv_id or inv_id not in data["pending_invoices"]:
+            return jsonify({"error": "Facture introuvable ou expirée"}), 404
+        pending = data["pending_invoices"].pop(inv_id)
+        extra = {
+            "telegram_user_id": _uid_value(body.get("telegram_user_id") or pending.get("telegram_user_id")),
+            "client_name": pending.get("client_name"),
+            "client_phone": pending.get("client_phone"),
+            "client_address": pending.get("client_address"),
+            "payment_method": "stars",
+            "paid_stars": paid,
+            "expected_stars": pending.get("stars"),
+            "telegram_charge_id": _clip(body.get("telegram_payment_charge_id"), 200) or None,
+        }
+        try:
+            if int(paid) < int(pending.get("stars") or 0):
+                extra["payment_note"] = f"Montant payé ({paid}★) inférieur au montant attendu ({pending.get('stars')}★)"
+        except (TypeError, ValueError):
+            extra["payment_note"] = "Montant payé non transmis par le bot"
+        order, invoice_filename, invoice_pdf = _append_order(data, pending["items"], extra)
 
-    _notify_admin_new_order(order, payment="Stars ★")
-    _send_telegram_document(invoice_pdf, invoice_filename, caption=f"🧾 Facture {invoice_number} — {order.get('id')}")
-
+    _notify_admin_new_order(order, payment=f"Stars ★ ({paid})")
+    _send_telegram_document(invoice_pdf, invoice_filename, caption=f"🧾 Facture {order['invoice_number']} — {order['id']}")
     return jsonify(order), 201
 
 
@@ -1069,17 +1371,50 @@ def get_momo():
     return jsonify(data["momo"])
 
 
-@limiter.limit("10 per minute")
+# ==================== Clients / sessions ====================
+
+def _upsert_client(data, user_id, name, username):
+    data.setdefault("clients", [])
+    existing = next((c for c in data["clients"] if _same_user(c.get("telegram_user_id"), user_id)), None)
+    if existing:
+        existing["name"] = existing.get("name") or name
+        existing["telegram_username"] = username
+        existing["updated_at"] = datetime.now().isoformat()
+        return existing, False
+    client = {
+        "id": f"CLI-{len(data['clients']) + 1}",
+        "telegram_user_id": _uid_value(user_id),
+        "telegram_username": username,
+        "name": name,
+        "phone": "",
+        "address": "",
+        "created_at": datetime.now().isoformat(),
+    }
+    data["clients"].append(client)
+    return client, True
+
+
+def _session_response(user_id, name, username):
+    with data_tx() as data:
+        client, created = _upsert_client(data, user_id, name, username)
+    return jsonify({
+        "telegram_user_id": user_id,
+        "name": name,
+        "username": username,
+        "client": client,
+        "token": _issue_session(user_id),
+        "is_admin": str(user_id) in ADMIN_TELEGRAM_IDS,
+    }), (201 if created else 200)
+
+
 @app.route("/api/auth/telegram", methods=["POST"])
+@limiter.limit("10 per minute")
 def auth_telegram():
-    """Valide les données du Telegram Login Widget et enregistre/met à jour le client."""
+    """Valide les données du Telegram Login Widget et ouvre une session."""
     if not TELEGRAM_BOT_TOKEN:
         return jsonify({"error": "Bot non configuré"}), 500
-    body = request.get_json() or {}
+    body = request.get_json(silent=True) or {}
     user_id = body.get("id")
-    first_name = body.get("first_name", "")
-    last_name = body.get("last_name", "")
-    username = body.get("username", "")
     auth_date = body.get("auth_date")
     hash_val = body.get("hash")
     if not user_id or not hash_val or not auth_date:
@@ -1088,35 +1423,19 @@ def auth_telegram():
     data_check = "\n".join(f"{k}={v}" for k, v in sorted(body.items()) if k != "hash")
     secret = hashlib.sha256(TELEGRAM_BOT_TOKEN.encode()).digest()
     computed = hmac.new(secret, data_check.encode(), hashlib.sha256).hexdigest()
-    if not hmac.compare_digest(computed, hash_val):
+    if not hmac.compare_digest(computed, str(hash_val)):
         return jsonify({"error": "Hash invalide"}), 400
+    try:
+        if abs(time.time() - int(auth_date)) > 86400:
+            return jsonify({"error": "Session expirée"}), 400
+    except (TypeError, ValueError):
+        return jsonify({"error": "auth_date invalide"}), 400
 
-    # Limite anti-replay (24h)
-    if abs(time.time() - int(auth_date)) > 86400:
-        return jsonify({"error": "Session expirée"}), 400
-
+    first_name = body.get("first_name", "")
+    last_name = body.get("last_name", "")
+    username = body.get("username", "")
     name = f"{first_name} {last_name}".strip() or username or f"User{user_id}"
-    data = load_data()
-    data.setdefault("clients", [])
-    existing = next((c for c in data["clients"] if c.get("telegram_user_id") == user_id), None)
-    if existing:
-        existing["name"] = name
-        existing["telegram_username"] = username
-        existing["updated_at"] = datetime.now().isoformat()
-        save_data(data)
-        return jsonify({"telegram_user_id": user_id, "name": name, "username": username, "client": existing})
-    client = {
-        "id": f"CLI-{len(data['clients']) + 1}",
-        "telegram_user_id": user_id,
-        "telegram_username": username,
-        "name": name,
-        "phone": "",
-        "address": "",
-        "created_at": datetime.now().isoformat(),
-    }
-    data["clients"].append(client)
-    save_data(data)
-    return jsonify({"telegram_user_id": user_id, "name": name, "username": username, "client": client}), 201
+    return _session_response(user_id, name, username)
 
 
 def _validate_init_data(init_data):
@@ -1124,7 +1443,6 @@ def _validate_init_data(init_data):
     if not TELEGRAM_BOT_TOKEN or not init_data or not init_data.strip():
         return None
     try:
-        # Parse query string (chaque clé peut apparaître une fois)
         params = urllib.parse.parse_qs(init_data, keep_blank_values=True)
         params_single = {k: (v[0] if v else "") for k, v in params.items()}
         hash_received = params_single.pop("hash", None)
@@ -1136,7 +1454,7 @@ def _validate_init_data(init_data):
         if not hmac.compare_digest(computed, hash_received):
             return None
         auth_date = params_single.get("auth_date")
-        if auth_date and abs(time.time() - int(auth_date)) > 86400:
+        if not auth_date or abs(time.time() - int(auth_date)) > 86400:
             return None  # Replay: 24h
         user_json = params_single.get("user")
         if not user_json:
@@ -1146,96 +1464,57 @@ def _validate_init_data(init_data):
         return None
 
 
-@limiter.limit("10 per minute")
 @app.route("/api/auth/telegram-miniapp", methods=["POST"])
+@limiter.limit("10 per minute")
 def auth_telegram_miniapp():
-    """Connexion automatique (Mini App). Valide init_data ; si vide, accepte init_data_unsafe_user en secours."""
+    """Connexion automatique (Mini App) : initData signé obligatoire."""
     if not TELEGRAM_BOT_TOKEN:
         return jsonify({"error": "Bot non configuré"}), 500
-    body = request.get_json() or {}
-    init_data = body.get("init_data", "").strip()
-    user = None
-    if init_data:
-        user = _validate_init_data(init_data)
-    if not user:
-        unsafe_user = body.get("init_data_unsafe_user")
-        if isinstance(unsafe_user, dict) and unsafe_user.get("id"):
-            user = unsafe_user
-    if not user:
-        return jsonify({"error": "init_data requis ou invalide"}), 400
+    body = request.get_json(silent=True) or {}
+    user = _validate_init_data(str(body.get("init_data") or "").strip())
+    if not user or not user.get("id"):
+        return jsonify({"error": "init_data requis ou invalide"}), 401
     user_id = user.get("id")
-    first_name = user.get("first_name", "")
-    last_name = user.get("last_name", "")
     username = user.get("username", "")
-    name = f"{first_name} {last_name}".strip() or username or f"User{user_id}"
-    data = load_data()
-    data.setdefault("clients", [])
-    existing = next((c for c in data["clients"] if str(c.get("telegram_user_id")) == str(user_id)), None)
-    if existing:
-        existing["name"] = name
-        existing["telegram_username"] = username
-        existing["updated_at"] = datetime.now().isoformat()
-        save_data(data)
-        return jsonify({"telegram_user_id": user_id, "name": name, "username": username, "client": existing})
-    client = {
-        "id": f"CLI-{len(data['clients']) + 1}",
-        "telegram_user_id": user_id,
-        "telegram_username": username,
-        "name": name,
-        "phone": "",
-        "address": "",
-        "created_at": datetime.now().isoformat(),
-    }
-    data["clients"].append(client)
-    save_data(data)
-    return jsonify({"telegram_user_id": user_id, "name": name, "username": username, "client": client}), 201
+    name = f"{user.get('first_name', '')} {user.get('last_name', '')}".strip() or username or f"User{user_id}"
+    return _session_response(user_id, name, username)
+
+
+@app.route("/api/admin/me", methods=["GET"])
+@limiter.limit("10 per minute")
+def admin_me():
+    """Vérifie une clé admin (navigateur) ou une session admin Telegram."""
+    if _is_admin():
+        return jsonify({"admin": True})
+    return jsonify({"admin": False}), 401
 
 
 @app.route("/api/register", methods=["POST"])
 def register_client():
-    """Inscription client depuis le bot Telegram."""
-    data = load_data()
-    data.setdefault("clients", [])
-    body = request.get_json() or {}
-    tg_id = body.get("telegram_user_id")
-    name = (body.get("name") or "").strip()
-    phone = (body.get("phone") or "").strip()
-    address = (body.get("address") or "").strip()
+    """Inscription / mise à jour du profil client (bot avec clé, ou client connecté)."""
+    body = request.get_json(silent=True) or {}
+    tg_id = _acting_user_id(body.get("telegram_user_id"))
     if not tg_id:
-        return jsonify({"error": "telegram_user_id requis"}), 400
+        return jsonify({"error": "Connexion Telegram requise"}), 401
+    name = _clip(body.get("name"), 120)
     if not name:
         return jsonify({"error": "Nom requis"}), 400
-
-    existing = next((c for c in data["clients"] if c.get("telegram_user_id") == tg_id), None)
-    if existing:
-        existing["name"] = name
-        existing["phone"] = phone
-        existing["address"] = address
-        existing["updated_at"] = datetime.now().isoformat()
-        save_data(data)
-        return jsonify(existing)
-    client = {
-        "id": f"CLI-{len(data['clients']) + 1}",
-        "telegram_user_id": tg_id,
-        "name": name,
-        "phone": phone,
-        "address": address,
-        "created_at": datetime.now().isoformat(),
-    }
-    data["clients"].append(client)
-    save_data(data)
-    return jsonify(client), 201
+    with data_tx() as data:
+        client, created = _upsert_client(data, tg_id, name, body.get("username") or "")
+        client["name"] = name
+        client["phone"] = _clip(body.get("phone"), 40)
+        client["address"] = _clip(body.get("address"), 300)
+    return jsonify(client), (201 if created else 200)
 
 
 @app.route("/api/profile", methods=["GET"])
 def get_profile():
-    """Récupère le profil client par telegram_user_id."""
-    data = load_data()
-    data.setdefault("clients", [])
-    tg_id = request.args.get("telegram_user_id", type=int)
+    """Profil du client connecté (ou de telegram_user_id pour le bot)."""
+    tg_id = _acting_user_id(request.args.get("telegram_user_id"))
     if not tg_id:
-        return jsonify({"error": "telegram_user_id requis"}), 400
-    client = next((c for c in data["clients"] if c.get("telegram_user_id") == tg_id), None)
+        return jsonify({"error": "Connexion Telegram requise"}), 401
+    data = load_data()
+    client = next((c for c in data.get("clients", []) if _same_user(c.get("telegram_user_id"), tg_id)), None)
     if not client:
         return jsonify({"error": "Profil non trouvé"}), 404
     return jsonify(client)
@@ -1243,24 +1522,20 @@ def get_profile():
 
 @app.route("/api/profile", methods=["PATCH"])
 def update_profile():
-    """Met à jour le profil client (nom, téléphone, adresse)."""
-    data = load_data()
-    data.setdefault("clients", [])
-    body = request.get_json() or {}
-    tg_id = body.get("telegram_user_id")
+    """Met à jour le profil du client connecté (nom, téléphone, adresse)."""
+    body = request.get_json(silent=True) or {}
+    tg_id = _acting_user_id(body.get("telegram_user_id"))
     if not tg_id:
-        return jsonify({"error": "telegram_user_id requis"}), 400
-    client = next((c for c in data["clients"] if c.get("telegram_user_id") == tg_id), None)
-    if not client:
-        return jsonify({"error": "Profil non trouvé"}), 404
-    if "name" in body and body["name"] is not None:
-        client["name"] = str(body["name"]).strip()
-    if "phone" in body and body["phone"] is not None:
-        client["phone"] = str(body["phone"]).strip()
-    if "address" in body and body["address"] is not None:
-        client["address"] = str(body["address"]).strip()
-    client["updated_at"] = datetime.now().isoformat()
-    save_data(data)
+        return jsonify({"error": "Connexion Telegram requise"}), 401
+    with data_tx() as data:
+        client = next((c for c in data.get("clients", []) if _same_user(c.get("telegram_user_id"), tg_id)), None)
+        if not client:
+            return jsonify({"error": "Profil non trouvé"}), 404
+        limits = {"name": 120, "phone": 40, "address": 300}
+        for field, limit in limits.items():
+            if body.get(field) is not None:
+                client[field] = _clip(body[field], limit)
+        client["updated_at"] = datetime.now().isoformat()
     return jsonify(client)
 
 
@@ -1268,11 +1543,11 @@ def update_profile():
 def health():
     warnings = []
     if not ADMIN_API_KEY:
-        warnings.append("ADMIN_API_KEY non configuré — endpoints admin non protégés")
+        warnings.append("ADMIN_API_KEY non configuré — seuls les admins Telegram ont accès au panel")
     if not BLOB_READ_WRITE_TOKEN:
-        warnings.append("BLOB_READ_WRITE_TOKEN manquant — upload images désactivé")
+        warnings.append("BLOB_READ_WRITE_TOKEN manquant — images enregistrées sur disque")
     if not TELEGRAM_BOT_TOKEN:
-        warnings.append("TELEGRAM_BOT_TOKEN manquant — notifications désactivées")
+        warnings.append("TELEGRAM_BOT_TOKEN manquant — notifications et connexion Telegram désactivées")
     if not _HAS_LIMITER:
         warnings.append("flask-limiter non installé — rate limiting désactivé")
     if _cors_origins == ["*"]:
@@ -1280,78 +1555,103 @@ def health():
     return jsonify({
         "status": "ok",
         "service": "stickerstreet-api",
-        "database": "neon" if USE_NEON else "file",
+        "storage": "neon" if is_database_enabled() else "file",
         "warnings": warnings,
     })
 
 
+def _telegram_send_message(chat_id, text):
+    req_data = urllib.parse.urlencode({"chat_id": chat_id, "text": text, "parse_mode": "HTML"}).encode()
+    req = urllib.request.Request(
+        f"https://api.telegram.org/bot{TELEGRAM_BOT_TOKEN}/sendMessage",
+        data=req_data, method="POST",
+        headers={"Content-Type": "application/x-www-form-urlencoded"},
+    )
+    urllib.request.urlopen(req, timeout=5)
+
+
 def _send_telegram(text):
-    """Envoie un message à l'admin via Telegram."""
+    """Envoie un message aux admins via Telegram."""
     if not TELEGRAM_BOT_TOKEN or not ADMIN_TELEGRAM_IDS:
         return
+    for chat_id in ADMIN_TELEGRAM_IDS:
+        try:
+            _telegram_send_message(chat_id, text)
+        except Exception as e:
+            app.logger.warning(f"Telegram send failed for {chat_id}: {type(e).__name__}")
+
+
+def _send_telegram_to(chat_id, text):
+    """Message à un client (best effort : il doit avoir démarré le bot)."""
+    if not TELEGRAM_BOT_TOKEN or not chat_id:
+        return
     try:
-        url = f"https://api.telegram.org/bot{TELEGRAM_BOT_TOKEN}/sendMessage"
-        for chat_id in ADMIN_TELEGRAM_IDS:
-            req_data = urllib.parse.urlencode({"chat_id": chat_id, "text": text, "parse_mode": "HTML"}).encode()
-            req = urllib.request.Request(url, data=req_data, method="POST", headers={"Content-Type": "application/x-www-form-urlencoded"})
-            urllib.request.urlopen(req, timeout=5)
+        _telegram_send_message(chat_id, text)
     except Exception as e:
-        app.logger.warning(f"Telegram send failed: {e}")
+        app.logger.info(f"Telegram message to client {chat_id} failed: {type(e).__name__}")
+
+
+# ==================== Chat support (un fil par client) ====================
+
+def _welcome_message():
+    return {"from": "bot", "text": "Salut ! 👋 Bienvenue chez StickerStreet. Dis-moi ce qu'il te faut !", "time": datetime.now().strftime("%H:%M")}
 
 
 @app.route("/api/chat", methods=["GET"])
 def get_chat():
-    """Récupère tous les messages du support."""
-    data = load_data()
-    messages = data.get("chat", [])
-    if not messages:
-        return jsonify([{"from": "bot", "text": "Salut ! 👋 Bienvenue chez StickerStreet. Dis-moi ce qu'il te faut !", "time": datetime.now().strftime("%H:%M")}])
-    return jsonify(messages)
+    """Messages du fil de support du client connecté."""
+    uid = _session_user_id()
+    if not uid:
+        return jsonify({"error": "Connexion Telegram requise pour le chat"}), 401
+    messages = (load_data().get("chats") or {}).get(uid) or []
+    return jsonify(messages or [_welcome_message()])
 
 
-@limiter.limit("30 per minute")
 @app.route("/api/chat", methods=["POST"])
+@limiter.limit("30 per minute")
 def post_chat():
     """Le client envoie un message → stockage + notification admin Telegram."""
-    data = load_data()
-    body = request.get_json() or {}
-    text = (body.get("text") or "").strip()
+    uid = _session_user_id()
+    if not uid:
+        return jsonify({"error": "Connexion Telegram requise pour le chat"}), 401
+    body = request.get_json(silent=True) or {}
+    text = (body.get("text") or "").strip()[:MAX_TEXT_LEN]
     if not text:
         return jsonify({"error": "Message vide"}), 400
+    with data_tx() as data:
+        thread = data.setdefault("chats", {}).setdefault(uid, [])
+        thread.append({"from": "user", "text": text, "time": datetime.now().strftime("%H:%M"), "ts": int(time.time())})
+        del thread[:-200]
+        messages = list(thread)
+        client = next((c for c in data.get("clients", []) if _same_user(c.get("telegram_user_id"), uid)), {}) or {}
 
-    messages = data.get("chat", [])
-    time_str = datetime.now().strftime("%H:%M")
-
-    # Ajouter le message client
-    messages.append({"from": "user", "text": text, "time": time_str})
-    data["chat"] = messages
-    save_data(data)
-
-    # Notifier l'admin sur Telegram
-    _send_telegram(f"📩 <b>Client (WebApp) :</b>\n{text}")
-
+    who = html.escape(client.get("name") or f"User{uid}")
+    # Le tag #U<id> permet au bot de retrouver le client quand l'admin répond à ce message.
+    _send_telegram(f"📩 <b>{who}</b> (WebApp) #U{uid}\n\n{html.escape(text)}\n\n<i>↩️ Réponds à ce message pour répondre au client.</i>")
     return jsonify(messages)
 
 
 @app.route("/api/chat/reply", methods=["POST"])
 def post_chat_reply():
-    """L'admin répond via le bot → ajout du message (appelé par le bot)."""
-    data = load_data()
-    body = request.get_json() or {}
-    text = (body.get("text") or "").strip()
+    """L'admin répond via le bot → ajout du message dans le fil du client."""
+    auth_err = _require_admin_api_key()
+    if auth_err:
+        return auth_err
+    body = request.get_json(silent=True) or {}
+    uid = str(body.get("telegram_user_id") or "").strip()
+    text = (body.get("text") or "").strip()[:MAX_TEXT_LEN]
+    if not uid:
+        return jsonify({"error": "telegram_user_id requis"}), 400
     if not text:
         return jsonify({"error": "Message vide"}), 400
-
-    messages = data.get("chat", [])
-    time_str = datetime.now().strftime("%H:%M")
-    messages.append({"from": "bot", "text": text, "time": time_str})
-    data["chat"] = messages
-    save_data(data)
-
-    return jsonify(messages)
+    with data_tx() as data:
+        thread = data.setdefault("chats", {}).setdefault(uid, [])
+        thread.append({"from": "bot", "text": text, "time": datetime.now().strftime("%H:%M"), "ts": int(time.time())})
+        del thread[:-200]
+    return jsonify({"ok": True})
 
 
 if __name__ == "__main__":
     port = int(os.environ.get("PORT", 5000))
     debug = os.environ.get("FLASK_DEBUG", "false").lower() == "true"
-    app.run(host="0.0.0.0", port=port, debug=debug)
+    app.run(host="127.0.0.1", port=port, debug=debug)
