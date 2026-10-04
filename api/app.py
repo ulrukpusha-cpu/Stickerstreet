@@ -1835,11 +1835,12 @@ def get_chat():
 @app.route("/api/chat", methods=["POST"])
 @limiter.limit("30 per minute")
 def post_chat():
-    """Le client envoie un message → stockage + notification admin Telegram."""
-    uid = _session_user_id()
+    """Le client écrit au support (webapp, ou bot avec clé admin) → stockage + notification admin Telegram."""
+    body = request.get_json(silent=True) or {}
+    from_bot = _has_admin_key() and body.get("telegram_user_id") is not None
+    uid = str(body["telegram_user_id"]) if from_bot else _session_user_id()
     if not uid:
         return jsonify({"error": "Connexion Telegram requise pour le chat"}), 401
-    body = request.get_json(silent=True) or {}
     text = (body.get("text") or "").strip()[:MAX_TEXT_LEN]
     if not text:
         return jsonify({"error": "Message vide"}), 400
@@ -1850,9 +1851,10 @@ def post_chat():
         messages = list(thread)
         client = next((c for c in data.get("clients", []) if _same_user(c.get("telegram_user_id"), uid)), {}) or {}
 
-    who = html.escape(client.get("name") or f"User{uid}")
+    who = html.escape(client.get("name") or _clip(body.get("client_name"), 80) or f"User{uid}")
+    source = "Bot Telegram" if from_bot else "App"
     # Le tag #U<id> permet au bot de retrouver le client quand l'admin répond à ce message.
-    _send_telegram(f"📩 <b>{who}</b> (WebApp) #U{uid}\n\n{html.escape(text)}\n\n<i>↩️ Réponds à ce message pour répondre au client.</i>")
+    _send_telegram(f"📩 <b>{who}</b> ({source}) #U{uid}\n\n{html.escape(text)}\n\n<i>↩️ Réponds à ce message (glisse vers la gauche) pour répondre au client.</i>")
     return jsonify(messages)
 
 

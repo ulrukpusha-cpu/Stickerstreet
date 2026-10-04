@@ -2,6 +2,7 @@
 Bot Telegram StickerStreet - Relié à l'API et à la webapp
 Commande : python bot.py
 """
+import html
 import json
 import logging
 import os
@@ -10,7 +11,10 @@ import requests
 from dotenv import load_dotenv
 
 load_dotenv(override=True)  # priorité au .env (PM2 peut garder des valeurs CRLF dans dump.pm2)
-from telegram import Update, InlineKeyboardButton, InlineKeyboardMarkup, WebAppInfo, MenuButtonWebApp, ReplyKeyboardMarkup
+from telegram import (
+    Update, InlineKeyboardButton, InlineKeyboardMarkup, WebAppInfo, MenuButtonWebApp, ReplyKeyboardMarkup,
+    BotCommand, BotCommandScopeChat, BotCommandScopeDefault,
+)
 from telegram.ext import (
     Application,
     CommandHandler,
@@ -128,24 +132,23 @@ def xof_fmt(v):
 
 # ==================== Handlers ====================
 async def start(update: Update, context: ContextTypes.DEFAULT_TYPE):
-    keyboard = [[
-        InlineKeyboardButton("📱 Ouvrir l'app StickerStreet", web_app=WebAppInfo(url=WEBAPP_URL))
-    ]]
+    keyboard = [[InlineKeyboardButton("📱 Ouvrir l'app StickerStreet", web_app=WebAppInfo(url=WEBAPP_URL))]]
     await update.message.reply_text(
         "👋 *Bienvenue chez STICKERSTREET !*\n\n"
-        "Stickers, flyers et cartes de visite — imprimés sur mesure.\n\n"
-        "👉 *Ouvre l'app* (bouton ci-dessous) pour commander et payer en Stars — connexion automatique.\n\n"
+        "Stickers, flyers, cartes de visite, posters, t-shirts et art — imprimés sur mesure.\n\n"
+        "💳 Paiement Mobile Money (Wave, Orange, MTN, Moov, Djamo) ou Stars ⭐\n\n"
         "📌 *Commandes :*\n"
         "/catalog — Voir le catalogue\n"
-        "/order — Passer une commande\n"
-        "/orders — Mes commandes\n"
-        "/register — Créer mon profil client\n"
-        "/support — Contacter le support\n"
-        "/start — Ce message",
+        "/order — Mon panier et paiement\n"
+        "/orders — Suivre mes commandes\n"
+        "/profil — Mes coordonnées de livraison\n"
+        "/support — Écrire au support\n"
+        "/app — Ouvrir la boutique\n\n"
+        "👇 Ou utilise le clavier en bas de l'écran.",
         parse_mode="Markdown",
         reply_markup=InlineKeyboardMarkup(keyboard),
     )
-    await update.message.reply_text("⌨️ Menu rapide 👇", reply_markup=MENU_KB)
+    await update.message.reply_text("⌨️ Menu rapide activé 👇", reply_markup=MENU_KB)
 
 
 async def catalog(update: Update, context: ContextTypes.DEFAULT_TYPE):
@@ -426,16 +429,107 @@ async def register_cancel(update: Update, context: ContextTypes.DEFAULT_TYPE):
 
 
 async def support(update: Update, context: ContextTypes.DEFAULT_TYPE):
-    keyboard = [[
-        InlineKeyboardButton("📱 Ouvrir l'app (connexion auto)", web_app=WebAppInfo(url=WEBAPP_URL))
-    ]]
     await update.message.reply_text(
         "💬 *Support StickerStreet*\n\n"
-        "Clique ci-dessous pour ouvrir l'app (connexion automatique) ou écris ton message ici.\n\n"
-        "💡 *Admin :* Réponds ici aux messages des clients (webapp) — tes réponses s'afficheront dans le chat.",
+        "Écris ton message juste ici (texte libre) : il est transmis à l'équipe,\n"
+        "et la réponse arrive dans cette conversation (et dans le chat de l'app).",
         parse_mode="Markdown",
-        reply_markup=InlineKeyboardMarkup(keyboard),
+        reply_markup=MENU_KB,
     )
+
+
+async def client_support_message(update: Update, context: ContextTypes.DEFAULT_TYPE):
+    """Texte libre d'un client → fil de support (même circuit que le chat de l'app)."""
+    text = (update.message.text or "").strip()
+    if not text:
+        return
+    ok, res = api_post_full("/api/chat", {
+        "telegram_user_id": update.effective_user.id,
+        "client_name": update.effective_user.full_name,
+        "text": text,
+    })
+    if ok:
+        await update.message.reply_text("✅ Message transmis au support. On te répond ici dès que possible.", reply_markup=MENU_KB)
+    else:
+        await update.message.reply_text(f"❌ {res.get('error') or 'Envoi impossible pour le moment.'} Réessaie dans un instant.", reply_markup=MENU_KB)
+
+
+async def client_support_file(update: Update, context: ContextTypes.DEFAULT_TYPE):
+    """Photo / fichier d'un client (ex. son design) → transféré aux admins avec le tag #U pour répondre."""
+    user = update.effective_user
+    if str(user.id) in ADMIN_TELEGRAM_IDS:
+        return
+    sent = 0
+    for admin_id in _admin_user_ids:
+        try:
+            await context.bot.forward_message(admin_id, update.effective_chat.id, update.message.message_id)
+            await context.bot.send_message(
+                admin_id,
+                f"📎 Fichier de <b>{html.escape(user.full_name or 'client')}</b> (Bot Telegram) #U{user.id}\n"
+                "<i>↩️ Réponds à ce message pour répondre au client.</i>",
+                parse_mode="HTML",
+            )
+            sent += 1
+        except Exception as e:
+            logger.warning(f"Transfert fichier vers admin {admin_id} impossible: {e}")
+    await update.message.reply_text(
+        "✅ Fichier transmis à l'équipe, on revient vers toi ici." if sent else "❌ Transfert impossible pour le moment, réessaie plus tard.",
+        reply_markup=MENU_KB,
+    )
+
+
+async def profile_cmd(update: Update, context: ContextTypes.DEFAULT_TYPE):
+    """Affiche le profil client enregistré (coordonnées de livraison)."""
+    p = api_get(f"/api/profile?telegram_user_id={update.effective_user.id}")
+    if not p:
+        await update.message.reply_text(
+            "👤 Tu n'as pas encore de profil.\nEnvoie /register pour enregistrer nom, téléphone et adresse de livraison.",
+            reply_markup=MENU_KB,
+        )
+        return
+    await update.message.reply_text(
+        "👤 *Mon profil*\n\n"
+        f"Nom : {p.get('name') or '—'}\n"
+        f"Téléphone : {p.get('phone') or '—'}\n"
+        f"Adresse : {p.get('address') or '—'}\n\n"
+        "Pour modifier : /register",
+        reply_markup=MENU_KB,
+    )
+
+
+async def open_app(update: Update, context: ContextTypes.DEFAULT_TYPE):
+    # Bouton inline (et non bouton de clavier) : seul ce type transmet la connexion Telegram à l'app
+    await update.message.reply_text(
+        "📱 La boutique s'ouvre ici, connexion automatique :",
+        reply_markup=InlineKeyboardMarkup([[InlineKeyboardButton("🛍️ Ouvrir StickerStreet", web_app=WebAppInfo(url=WEBAPP_URL))]]),
+    )
+
+
+async def admin_summary(update: Update, context: ContextTypes.DEFAULT_TYPE):
+    """/admin : résumé des commandes (réservé aux ADMIN_TELEGRAM_ID)."""
+    if str(update.effective_user.id) not in ADMIN_TELEGRAM_IDS:
+        return
+    orders = api_get("/api/orders") or []
+    today = __import__("datetime").date.today().isoformat()
+    awaiting = [o for o in orders if o.get("payment_status") == "awaiting"]
+    review = [o for o in orders if o.get("payment_status") == "review"]
+    to_make = [o for o in orders if o.get("status") in ("confirmed", "production")]
+    paid_today = sum(int(o.get("totalXof") or 0) for o in orders
+                     if o.get("payment_status") == "paid" and str(o.get("paid_at", "")).startswith(today))
+    lines = [
+        "🛠 *Admin StickerStreet*\n",
+        f"📦 Commandes : {len(orders)}",
+        f"⏳ En attente de paiement : {len(awaiting)}",
+        f"⚠️ Paiements à vérifier : {len(review)}",
+        f"🖨 À produire (confirmées / en production) : {len(to_make)}",
+        f"💰 Encaissé aujourd'hui (Jèko) : {xof_fmt(paid_today)}",
+    ]
+    if to_make:
+        lines.append("\n*À produire :*")
+        lines += [f"• {o['id']} — {xof_fmt(o.get('totalXof', 0))} — {o.get('client_name') or '—'}" for o in to_make[:8]]
+    lines.append("\n💬 Messages clients : réponds (glisse vers la gauche) à leur notification 📩.")
+    lines.append(f"🖥 Panel complet : {WEBAPP_URL} (profil → Panel admin)")
+    await update.message.reply_text("\n".join(lines), parse_mode="Markdown", disable_web_page_preview=True)
 
 
 async def pre_checkout(update: Update, context: ContextTypes.DEFAULT_TYPE):
@@ -505,7 +599,7 @@ async def admin_chat_reply(update: Update, context: ContextTypes.DEFAULT_TYPE):
 
 
 async def _fallback_text(update: Update, context: ContextTypes.DEFAULT_TYPE):
-    """Message texte non capturé — redirige vers les commandes."""
+    """Message non texte (photo, sticker…) — redirige vers les commandes."""
     await update.message.reply_text(
         "💡 Utilise les commandes pour naviguer :\n"
         "/start · /catalog · /order · /orders · /support"
@@ -537,29 +631,57 @@ async def callback_handler(update: Update, context: ContextTypes.DEFAULT_TYPE):
 
 
 async def post_init(app):
-    """Configure le bouton Menu principal pour ouvrir la webapp (initData inclus)."""
+    """Configure le menu des commandes (clients + admin) et le bouton Menu qui ouvre la webapp."""
+    try:
+        await app.bot.set_my_commands(CLIENT_COMMANDS, scope=BotCommandScopeDefault())
+        for admin_id in _admin_user_ids:
+            await app.bot.set_my_commands(
+                [BotCommand("admin", "🛠 Résumé des commandes (admin)"), *CLIENT_COMMANDS],
+                scope=BotCommandScopeChat(chat_id=admin_id),
+            )
+    except Exception as e:
+        logger.warning(f"Commandes non configurées: {e}")
     try:
         await app.bot.set_chat_menu_button(menu_button=MenuButtonWebApp(text="🛒 StickerStreet", web_app=WebAppInfo(url=WEBAPP_URL)))
     except Exception as e:
         logger.warning(f"Menu button non configuré: {e}")
 
 
+BTN_CATALOG, BTN_CART, BTN_ORDERS = "🛍️ Catalogue", "🛒 Mon panier", "📦 Mes commandes"
+BTN_PROFILE, BTN_SUPPORT, BTN_APP = "👤 Mon profil", "💬 Support", "📱 Ouvrir l'app"
 MENU_KB = ReplyKeyboardMarkup(
-    [["🛍️ Catalogue", "🛒 Commander"], ["📦 Mes commandes", "🆘 Support"]],
+    [[BTN_CATALOG, BTN_CART], [BTN_ORDERS, BTN_PROFILE], [BTN_SUPPORT, BTN_APP]],
     resize_keyboard=True,
+    is_persistent=True,
+    input_field_placeholder="Écris au support ou choisis un bouton",
 )
+# Anciens libellés : encore affichés chez les clients qui n'ont pas relancé /start
+LEGACY_BUTTONS = {"🛒 Commander": BTN_CART, "🆘 Support": BTN_SUPPORT}
+MENU_BUTTONS = [BTN_CATALOG, BTN_CART, BTN_ORDERS, BTN_PROFILE, BTN_SUPPORT, BTN_APP, *LEGACY_BUTTONS]
 
 
 async def menu_button_handler(update: Update, context: ContextTypes.DEFAULT_TYPE):
     t = (update.message.text or "").strip()
-    if t == "🛍️ Catalogue":
-        return await catalog(update, context)
-    if t == "🛒 Commander":
-        return await order_start(update, context)
-    if t == "📦 Mes commandes":
-        return await my_orders(update, context)
-    if t == "🆘 Support":
-        return await support(update, context)
+    t = LEGACY_BUTTONS.get(t, t)
+    handler = {
+        BTN_CATALOG: catalog, BTN_CART: order_start, BTN_ORDERS: my_orders,
+        BTN_PROFILE: profile_cmd, BTN_SUPPORT: support, BTN_APP: open_app,
+    }.get(t)
+    if handler:
+        return await handler(update, context)
+
+
+CLIENT_COMMANDS = [
+    BotCommand("start", "Accueil et menu"),
+    BotCommand("catalog", "Voir le catalogue"),
+    BotCommand("order", "Mon panier et paiement"),
+    BotCommand("orders", "Suivre mes commandes"),
+    BotCommand("profil", "Mes coordonnées de livraison"),
+    BotCommand("register", "Enregistrer / modifier mon profil"),
+    BotCommand("support", "Écrire au support"),
+    BotCommand("app", "Ouvrir la boutique"),
+    BotCommand("cancel", "Annuler l'inscription en cours"),
+]
 
 
 def main():
@@ -578,7 +700,7 @@ def main():
         },
         fallbacks=[CommandHandler("cancel", register_cancel)],
     )
-    app.add_handler(MessageHandler(filters.Text(["🛍️ Catalogue", "🛒 Commander", "📦 Mes commandes", "🆘 Support"]), menu_button_handler))
+    app.add_handler(MessageHandler(filters.Text(MENU_BUTTONS), menu_button_handler))
     app.add_handler(PreCheckoutQueryHandler(pre_checkout))
     app.add_handler(MessageHandler(filters.SUCCESSFUL_PAYMENT, successful_payment))
     app.add_handler(conv_register)
@@ -587,12 +709,19 @@ def main():
     app.add_handler(CommandHandler("order", order_start))
     app.add_handler(CommandHandler("orders", my_orders))
     app.add_handler(CommandHandler("support", support))
+    app.add_handler(CommandHandler(["profil", "profile"], profile_cmd))
+    app.add_handler(CommandHandler("app", open_app))
+    app.add_handler(CommandHandler(["aide", "help"], start))
+    app.add_handler(CommandHandler("admin", admin_summary))
     if _admin_user_ids:
         app.add_handler(MessageHandler(
             filters.TEXT & ~filters.COMMAND & filters.User(user_id=_admin_user_ids),
             admin_chat_reply,
         ))
-    app.add_handler(MessageHandler(filters.TEXT & ~filters.COMMAND, _fallback_text))
+    # Texte libre d'un client = message au support (l'admin, lui, est capté juste au-dessus)
+    app.add_handler(MessageHandler(filters.TEXT & ~filters.COMMAND, client_support_message))
+    app.add_handler(MessageHandler(filters.ChatType.PRIVATE & (filters.PHOTO | filters.Document.ALL), client_support_file))
+    app.add_handler(MessageHandler(filters.ChatType.PRIVATE & ~filters.COMMAND & ~filters.SUCCESSFUL_PAYMENT & ~filters.TEXT, _fallback_text))
     app.add_handler(CallbackQueryHandler(callback_handler))
 
     print("🤖 Bot StickerStreet en cours d'exécution...")
