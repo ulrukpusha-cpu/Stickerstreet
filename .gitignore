@@ -32,3 +32,4 @@ Thumbs.db
 api/data.json
 api/.stickerstreet-data.lock
 api/gunicorn.ctl
+api/catalogue-*.json
