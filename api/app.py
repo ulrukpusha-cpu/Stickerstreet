@@ -144,7 +144,7 @@ JEKO_WEBHOOK_SECRET = (os.environ.get("JEKO_WEBHOOK_SECRET", "") or "").strip()
 JEKO_OPERATORS = {"wave": "Wave", "orange": "Orange Money", "mtn": "MTN MoMo", "moov": "Moov Money", "djamo": "Djamo"}
 # URL publique de la webapp (retour client après paiement Jèko) : ngrok aujourd'hui, stickerstreet.ci ensuite
 PUBLIC_APP_URL = (os.environ.get("PUBLIC_APP_URL", "") or "").strip().rstrip("/")
-PRODUCT_CATEGORIES = {"stickers", "flyers", "cartes", "posters", "tshirts", "art", "photo"}
+PRODUCT_CATEGORIES = {"stickers", "flyers", "cartes", "posters", "tshirts", "mugs", "art", "photo"}
 
 
 def _default_data():

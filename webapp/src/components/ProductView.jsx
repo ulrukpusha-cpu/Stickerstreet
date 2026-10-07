@@ -10,6 +10,7 @@ const CAT_META = {
   flyers: { label: "FLYER", color: "#0E9F7A" },
   posters: { label: "POSTER", color: "#1C7ED6" },
   tshirts: { label: "TEXTILE DTF", color: "#E8590C" },
+  mugs: { label: "MUG & GOURDE", color: "#0B7285" },
   art: { label: "ART", color: "#9C36B5" },
 };
 

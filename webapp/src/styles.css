@@ -98,10 +98,9 @@ img { display: block; max-width: 100%; }
 .header-left, .header-right { display: flex; align-items: center; gap: 8px; }
 .header-spacer { height: calc(61px + var(--tg-top, 0px)); }
 .logo { user-select: none; -webkit-user-select: none; line-height: 1; background: none; border: 0; padding: 0; text-align: left; color: var(--text); }
-.logo-word { font-family: var(--font-display); font-weight: 800; font-size: 17px; letter-spacing: -0.02em; }
-.logo-word b { color: var(--brand); font-weight: 800; }
-.logo-tag { font-size: 9px; letter-spacing: 0.24em; color: var(--text-3); font-weight: 600; margin-top: 5px; display: flex; align-items: center; gap: 6px; }
-.logo-dot { width: 6px; height: 6px; border-radius: 50%; background: var(--ok); }
+.logo { position: relative; display: block; }
+.logo-img { display: block; height: 42px; width: auto; max-width: 52vw; object-fit: contain; }
+.logo-dot { position: absolute; right: -4px; top: 2px; width: 7px; height: 7px; border-radius: 50%; background: var(--ok); box-shadow: 0 0 0 2px var(--bg); }
 .logo-dot.admin { background: var(--warn); }
 
 .icon-btn {

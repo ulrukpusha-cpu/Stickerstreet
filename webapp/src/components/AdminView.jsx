@@ -2,8 +2,8 @@ import { useEffect, useMemo, useRef, useState } from "react";
 import Icon from "./Icon";
 import { XOF_FMT, STATUSES, PAY_LABELS, PAYMENT_STATUS } from "../data/constants";
 
-const CATS = ["stickers", "flyers", "cartes", "posters", "tshirts", "art", "photo"];
-const CAT_LABELS = { stickers: "Stickers", flyers: "Flyers", cartes: "Cartes", posters: "Posters", tshirts: "T-shirts", art: "Art", photo: "Photo" };
+const CATS = ["stickers", "flyers", "cartes", "posters", "tshirts", "mugs", "art", "photo"];
+const CAT_LABELS = { stickers: "Stickers", flyers: "Flyers", cartes: "Cartes", posters: "Posters", tshirts: "T-shirts", mugs: "Mugs", art: "Art", photo: "Photo" };
 const XOF_PER_USD = 600;
 const USD_PER_TON = 6.25;
 const ORDER_FILTERS = [

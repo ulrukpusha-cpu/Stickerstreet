@@ -168,7 +168,7 @@ async def catalog(update: Update, context: ContextTypes.DEFAULT_TYPE):
 
     cat_names = {
         "stickers": "🏷️ Stickers", "flyers": "📄 Flyers", "cartes": "🪪 Cartes",
-        "posters": "🖼️ Posters", "tshirts": "👕 T-shirts & textile", "art": "🎨 Art", "photo": "📷 Photo",
+        "posters": "🖼️ Posters", "tshirts": "👕 T-shirts & textile", "mugs": "☕ Mugs & gourdes", "art": "🎨 Art", "photo": "📷 Photo",
     }
 
     for cat, prods in cats.items():

@@ -102,10 +102,11 @@ export default function App() {
   const longPress = useRef(null);
   const notifTimer = useRef(null);
 
+  // Le choix fait avec le bouton lune/soleil prime ; sinon on suit Telegram, puis le système.
   const [dark, setDark] = useState(() => {
-    if (tg?.colorScheme === "dark" || tg?.colorScheme === "light") return tg.colorScheme === "dark";
     const saved = readJson("stickerstreet_theme", null);
     if (saved === "dark" || saved === "light") return saved === "dark";
+    if (tg?.colorScheme === "dark" || tg?.colorScheme === "light") return tg.colorScheme === "dark";
     return window.matchMedia?.("(prefers-color-scheme: dark)").matches ?? false;
   });
   const t = THEMES[dark ? "dark" : "light"];
@@ -128,7 +129,8 @@ export default function App() {
   useEffect(() => {
     if (!tg) return;
     const onTheme = () => {
-      setDark(tg.colorScheme === "dark");
+      const saved = readJson("stickerstreet_theme", null);
+      if (saved !== "dark" && saved !== "light") setDark(tg.colorScheme === "dark");
       syncTelegramThemeCssVars(tg);
     };
     onTheme();
@@ -588,13 +590,13 @@ export default function App() {
             onContextMenu={(e) => e.preventDefault()}
             aria-label="StickerStreet — accueil"
           >
-            <div className="logo-word"><b>STICKER</b>STREET</div>
-            <div className="logo-tag"><span className={`logo-dot${isAdmin ? " admin" : ""}`} />PRINT · STICK · REP</div>
+            <img className="logo-img" src={dark ? "/images/logo-dark.png" : "/images/logo-light.png"} alt="StickerStreet — Print. Stick. Rep" width="462" height="132" />
+            {isAdmin && <span className="logo-dot admin" title="Mode admin" />}
           </button>
         </div>
         <div className="header-right">
-          <button className={`icon-btn${view === "favorites" ? " is-active" : ""}`} onClick={() => go("favorites")} aria-label="Favoris">
-            <Icon name="heart" size={19} fill={favorites.length > 0} style={{ color: favorites.length > 0 ? "var(--brand)" : undefined }} />
+          <button className="icon-btn" onClick={toggleTheme} aria-label={dark ? "Passer au thème clair" : "Passer au thème sombre"} title={dark ? "Thème clair" : "Thème sombre"}>
+            <Icon name={dark ? "sun" : "moon"} size={19} />
           </button>
           <button className={`icon-btn${count > 0 ? " is-brand" : ""}`} onClick={() => go("cart")} aria-label={`Panier (${count})`}>
             <Icon name="bag" size={19} />
@@ -678,7 +680,7 @@ export default function App() {
               isAdmin={isAdmin}
               canAdmin={tgAdmin}
               dark={dark}
-              toggleTheme={isTgMiniApp ? null : toggleTheme}
+              toggleTheme={toggleTheme}
               openAdmin={openAdmin}
               go={go}
               notify={notify}

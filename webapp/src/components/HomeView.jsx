@@ -10,6 +10,7 @@ const CATS = [
   { k: "cartes", l: "Cartes de visite" },
   { k: "posters", l: "Posters" },
   { k: "tshirts", l: "T-shirts" },
+  { k: "mugs", l: "Mugs & gourdes" },
   { k: "art", l: "Art" },
   { k: "photo", l: "Photo" },
 ];
